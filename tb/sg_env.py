@@ -92,9 +92,6 @@ class Env:
 
         cocotb.start_soon(Clock(dut.clk, 10, "ns").start())
 
-        dut.s_axi_awsid.value = 0
-        dut.s_axi_arsid.value = 0
-
         self.apb = Apb(dut)
         self.axi = AxiMaster(AxiBus.from_prefix(dut, "s_axi"), dut.clk,
                              dut.rst_n, reset_active_level=False)

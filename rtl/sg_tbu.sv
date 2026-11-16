@@ -1,7 +1,8 @@
 // StreamGuard - translation buffer unit (datapath).
 //
 // Sits in-line on an AXI4 link between a device (upstream, s_axi_*)
-// and the memory system (downstream, m_axi_*).
+// and the memory system (downstream, m_axi_*). The StreamID of each
+// request is carried on AWUSER / ARUSER.
 //
 //   * AW and AR each go through an address channel handler that gets
 //     a forward/terminate decision from the translation logic.
@@ -37,7 +38,7 @@ module sg_tbu #(
   input  logic [3:0]          s_axi_awcache,
   input  logic [2:0]          s_axi_awprot,
   input  logic [3:0]          s_axi_awqos,
-  input  logic [SID_W-1:0]    s_axi_awsid,
+  input  logic [SID_W-1:0]    s_axi_awuser,
   input  logic                s_axi_awvalid,
   output logic                s_axi_awready,
 
@@ -61,7 +62,7 @@ module sg_tbu #(
   input  logic [3:0]          s_axi_arcache,
   input  logic [2:0]          s_axi_arprot,
   input  logic [3:0]          s_axi_arqos,
-  input  logic [SID_W-1:0]    s_axi_arsid,
+  input  logic [SID_W-1:0]    s_axi_aruser,
   input  logic                s_axi_arvalid,
   output logic                s_axi_arready,
 
@@ -163,7 +164,7 @@ module sg_tbu #(
     .s_valid     (s_axi_awvalid),
     .s_ready     (s_axi_awready),
     .s_addr      (s_axi_awaddr),
-    .s_sid       (s_axi_awsid),
+    .s_sid       (s_axi_awuser),
     .s_pay       (aw_s_pay),
     .x_req_valid (aw_xreq_valid),
     .x_req_ready (aw_xreq_ready),
@@ -189,7 +190,7 @@ module sg_tbu #(
     .s_valid     (s_axi_arvalid),
     .s_ready     (s_axi_arready),
     .s_addr      (s_axi_araddr),
-    .s_sid       (s_axi_arsid),
+    .s_sid       (s_axi_aruser),
     .s_pay       (ar_s_pay),
     .x_req_valid (ar_xreq_valid),
     .x_req_ready (ar_xreq_ready),

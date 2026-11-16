@@ -41,7 +41,7 @@ its own AXI port for reading tables from memory.
 
 | Port group | Protocol | Direction | Purpose |
 |---|---|---|---|
-| `s_axi_*` | AXI4, plus `awsid`/`arsid` | from device | accesses to be policed |
+| `s_axi_*` | AXI4, StreamID on `awuser`/`aruser` | from device | accesses to be policed |
 | `m_axi_*` | AXI4 | to memory | forwarded accesses |
 | `s_apb_*` | APB4, 17-bit address | from software | registers |
 

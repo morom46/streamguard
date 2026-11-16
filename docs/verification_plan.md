@@ -70,7 +70,41 @@ All in test_translate.py.
 
 The random tests fail if they did not reach every fault type at least once.
 
-## 4. Assertions
+## 4. Milestone 3 features and tests
+
+The caches must never change the outcome of an access. The main check is
+therefore the cached versions of the random tests: the same random tables and
+accesses as milestone 2, with the caches on, mappings changed now and then
+(each change followed by an invalidation, as software must do), and some
+locality so that hits happen. Every access must still match the uncached
+reference model exactly; only the number of table reads may be lower.
+Directed tests in test_cache.py check the caches themselves.
+
+| Feature | Test | File |
+|---|---|---|
+| Outcome unchanged by caching, with remaps and invalidations | `random_tables_against_model_cached` (+ `_with_backpressure`) | test_translate.py |
+| Four streams at once with caches on | `concurrent_streams_cached` | test_translate.py |
+| TLB hit needs no table reads; counters | `tlb_hit_skips_walk` | test_cache.py |
+| Walk cache hit needs one read; configuration cache skips STE and CD | `walk_cache_and_config_cache` | test_cache.py |
+| 2 MB and 1 GB entries cover the whole block, and only the block | `block_entries_cover_the_whole_block` | test_cache.py |
+| Permissions checked on every hit; permission-faulting walks fill the TLB | `permissions_checked_on_hit` | test_cache.py |
+| Translation, access flag and configuration faults are not cached | `faults_are_not_cached` | test_cache.py |
+| Abort and bypass configurations are cached | `abort_and_bypass_configs_are_cached` | test_cache.py |
+| Different ASIDs keep streams apart | `asid_keeps_streams_apart` | test_cache.py |
+| Same ASID shares entries (architected behaviour) | `same_asid_shares_translations` | test_cache.py |
+| Stale translation used until invalidation, then the new one | `stale_until_invalidated` | test_cache.py |
+| Invalidation during a walk: no stale fill | `invalidate_during_walk` | test_cache.py |
+| Disable: no hits, no fills, entries already present ignored | `caches_can_be_disabled` | test_cache.py |
+| Counter clear leaves the caches intact | `counters_clear` | test_cache.py |
+| Round robin replacement when full | `tlb_replacement` | test_cache.py |
+| Hit, walk cache hit and miss latency | `hit_latency` | test_cache.py |
+| SG_CTRL, SG_INV and counter registers | `cache_control_registers` | test_regs.py |
+
+`invalidate_during_walk` holds the table read port after the level 2 read,
+repoints the level 2 entry and invalidates, then releases. The access in
+flight completes with the old page; the next access must see the new one.
+
+## 5. Assertions
 
 | Name | Property |
 |---|---|
@@ -78,8 +112,9 @@ The random tests fail if they did not reach every fault type at least once.
 | `u_chk_s_b`, `u_chk_s_r` | the same for responses driven to the device |
 | `a_b_no_clash`, `a_r_no_clash` | a local error response never coincides with a downstream response |
 | `a_wq_no_overflow` | the W decision queue never overflows |
+| `a_tlb_single_hit`, `a_cache_single_hit` | no address matches more than one cache entry |
 
-## 5. Do the tests catch bugs?
+## 6. Do the tests catch bugs?
 
 A regression that passes proves little unless it can fail. Each of these bugs
 was put into the RTL, the regression run, and the change reverted.
@@ -97,13 +132,23 @@ was put into the RTL, the regression run, and the change reverted.
 | Every stream uses stream table entry 0 | all 15 translation tests |
 | Walk always starts at level 0 | `t0sz_sets_start_level_and_range`, both random tests |
 | Address size fault checked after the access flag | `address_size_faults`, both random tests |
+| Invalidation during a lookup does not stop its fill | `invalidate_during_walk` |
+| TLB ignores the ASID | `asid_keeps_streams_apart`, `concurrent_streams_cached` |
+| 2 MB entries compared as 4 KB pages | `block_entries_cover_the_whole_block`, both cached random tests |
+| No permission check on a TLB hit | `permissions_checked_on_hit`, both cached random tests, `concurrent_streams_cached` |
+| Invalidation does not clear the TLB | `stale_until_invalidated`, `same_asid_shares_translations` |
+| Cache disable ignored by the TLB | `caches_can_be_disabled` (missed at first; the test gained the "disable after fill" case) |
+| Cache disable ignored by the configuration cache | `caches_can_be_disabled` |
+| Walks ending in any fault fill the TLB | `faults_are_not_cached`, both cached random tests |
+| Walk cache looked up with the previous request's ASID | `concurrent_streams_cached` only |
 
-## 6. Results
+## 7. Results
 
 | Milestone | Tests | Seeds | Result |
 |---|---|---|---|
 | 1 | 17 | 1 to 8 | all pass |
 | 2 | 33 | 1 to 8 | all pass |
+| 3 | 51 | 1 to 8 | all pass |
 
 Synthesis check (Yosys, generic gates, default parameters):
 
@@ -111,8 +156,12 @@ Synthesis check (Yosys, generic gates, default parameters):
 |---|---|---|
 | 1 | 825 | 266 |
 | 2 | 2761 | 733 |
+| 3 | 13322 | 2268 |
 
-## 7. Known gaps
+Most of the milestone 3 growth is cache storage: the TLB alone holds 8 entries
+of about 90 bits.
+
+## 8. Known gaps
 
 - No functional coverage yet, so "which cases were hit" is not measured.
 - Reset is only tested while idle, not during a burst.
@@ -126,3 +175,12 @@ Synthesis check (Yosys, generic gates, default parameters):
   specification, so a shared misreading would not be caught. The spec
   cross-check table in architecture.md tracks this.
 - No block-level testbench for the walker; it is tested through the top level.
+- Cached random tests mostly miss: random addresses over large tables give a
+  TLB hit rate around 10 percent. Hit paths are covered mainly by the directed
+  tests. A realistic traffic pattern belongs to the sizing study.
+- Only one replacement policy (round robin) and one set of cache sizes are
+  tested.
+- The walk cache ASID bug above is caught by only one test; a directed test
+  with two ASIDs in the same 2 MB region would be stronger.
+- Invalidation is all or nothing through a StreamGuard-specific register until
+  the command queue adds the architected commands.

@@ -7,6 +7,10 @@ reads the same memory the hardware reads. The test then checks
     * the fault code and level reported inside the unit
     * for a forwarded access: the address seen downstream and the data
     * for a terminated access: that nothing went downstream
+
+These tests run with the caches off, so each lookup must make exactly
+the table reads the model predicts. The random tests also run with the
+caches on; test_cache.py covers the caches themselves.
 """
 
 import cocotb
@@ -14,107 +18,9 @@ from cocotb.triggers import Combine, RisingEdge, with_timeout
 from cocotbext.axi import AxiProt, AxiResp
 
 import sg_model as model
-from sg_env import CR0_SMMUEN, Env
+from sg_bench import DATA_HI, PRIV, TIMEOUT_NS, UNPRIV, Bench, pattern
 from sg_pgtable import (BLOCK_1G, BLOCK_2M, LEVEL_SHIFT, PAGE, Context,
-                        TablePool, leaf_desc, table_desc, write_cd, write_ste)
-
-TIMEOUT_NS = 5_000_000
-UNPRIV = int(AxiProt.NONSECURE)                      # unprivileged data access
-PRIV = int(AxiProt.NONSECURE | AxiProt.PRIVILEGED)
-DATA_HI = 1 << 47            # data lives in the upper half, tables in the lower
-
-
-def pattern(rng, n):
-    return bytes(rng.getrandbits(8) for _ in range(n))
-
-
-class Bench:
-    LOG2SIZE = 4             # 16 stream table entries
-
-    def __init__(self, dut):
-        self.dut = dut
-        self.env = Env(dut)
-        self.rng = self.env.rng
-        self.mem = self.env.ram
-        base = self.rng.randrange(1, 1 << 20) << 24          # below bit 47
-        self.pool = TablePool(self.mem, self.rng, base)
-        self.strtab = self.pool.alloc()
-        self.rsp = []        # (fault, fcode, level) of every translation
-
-    async def start(self, backpressure=None):
-        await self.env.reset()
-        if backpressure:
-            self.env.add_backpressure(backpressure, backpressure)
-        await self.env.set_strtab(self.strtab, self.LOG2SIZE)
-        await self.env.set_cr0(CR0_SMMUEN)
-        cocotb.start_soon(self._probe())
-
-    async def _probe(self):
-        x = self.dut.u_xlate
-        while True:
-            await RisingEdge(self.dut.clk)
-            if int(x.rsp_valid.value):
-                self.rsp.append((bool(int(x.rsp_fault.value)),
-                                 int(x.rsp_fcode.value), int(x.rsp_flevel.value)))
-
-    def add_stream(self, sid, t0sz=16, **cd_fields):
-        ctx = Context(self.pool, t0sz)
-        cd = self.pool.alloc()
-        write_cd(self.mem, cd, ctx.root, t0sz=t0sz, **cd_fields)
-        write_ste(self.mem, self.strtab, sid, model.STE_CFG_S1, cd)
-        ctx.cd_addr = cd
-        return ctx
-
-    def predict(self, sid, va, write, prot):
-        return model.translate(self.mem.read_qword, self.strtab, self.LOG2SIZE,
-                               sid, va, write, prot)
-
-    async def access(self, sid, va, length=8, write=False, prot=UNPRIV):
-        """One access, checked against the model. Returns the prediction."""
-        env = self.env
-        exp = self.predict(sid, va, write, prot)
-        n_rsp, n_down, n_tab = len(self.rsp), len(env.downstream), env.table_reads
-        data = pattern(self.rng, length)
-
-        if write:
-            resp = await with_timeout(
-                env.axi.write(va, data, user=sid, prot=AxiProt(prot)), TIMEOUT_NS, "ns")
-        else:
-            if not exp.fault:
-                self.mem.write(exp.addr, data)
-            resp = await with_timeout(
-                env.axi.read(va, length, user=sid, prot=AxiProt(prot)), TIMEOUT_NS, "ns")
-
-        what = f"sid {sid} va {va:#x} {'W' if write else 'R'} prot {prot:#b}: expected {exp}"
-        assert len(self.rsp) == n_rsp + 1, what
-        assert self.rsp[-1] == (exp.fault, exp.fcode, exp.level), \
-            f"{what}, hardware reported {self.rsp[-1]}"
-        assert env.table_reads - n_tab == exp.reads, \
-            f"{what}: {env.table_reads - n_tab} table reads, expected {exp.reads}"
-
-        if exp.fault:
-            assert resp.resp == AxiResp.SLVERR, what
-            assert len(env.downstream) == n_down, f"{what}: went downstream"
-            if not write:
-                assert resp.data == bytes(length)
-        else:
-            assert resp.resp == AxiResp.OKAY, what
-            assert len(env.downstream) == n_down + 1, what
-            assert env.downstream[-1][1] == exp.addr, \
-                f"{what}: downstream address {env.downstream[-1][1]:#x}"
-            if write:
-                assert self.mem.read(exp.addr, length) == data, what
-            else:
-                assert resp.data == data, what
-        return exp
-
-    async def expect(self, fcode, level=None, **kw):
-        exp = await self.access(**kw)
-        assert exp.fcode == fcode and exp.fault == (fcode != model.FC_NONE), \
-            f"test set-up error: model says {exp}"
-        if level is not None:
-            assert exp.level == level, f"test set-up error: model says {exp}"
-        return exp
+                        leaf_desc, table_desc, write_cd, write_ste)
 
 
 # ---------------------------------------------------------------------
@@ -390,6 +296,7 @@ def build_random_stream(b, sid):
     ctx = b.add_stream(sid, t0sz, affd=int(rng.random() < 0.15))
     span = 1 << (64 - t0sz)
     targets = []
+    leaves = []                                         # (va, level) of good mappings
 
     for _ in range(16):
         level = rng.choice([3, 3, 3, 2, 2, 1])
@@ -404,6 +311,7 @@ def build_random_stream(b, sid):
                 ro=int(rng.random() < 0.3), pxn=int(rng.random() < 0.2),
                 uxn=int(rng.random() < 0.2))
         targets.append((va, size))
+        leaves.append((va, level))
 
     for _ in range(8):                                  # faulty entries
         level = rng.randint(ctx.start, 3)
@@ -427,10 +335,25 @@ def build_random_stream(b, sid):
         va = va // size * size
         ctx.poke(va, level, value)
         targets.append((va, size))
-    return span, targets
+    ctx.leaves = leaves
+    return span, targets, ctx
 
 
-def random_access(rng, span, targets):
+def remap_random_leaf(b, ctx):
+    """Point one existing mapping somewhere else with new attributes."""
+    rng = b.rng
+    if not ctx.leaves:
+        return
+    va, level = rng.choice(ctx.leaves)
+    size = 1 << LEVEL_SHIFT[level]
+    pa = DATA_HI | (rng.randrange((1 << 47) // size) * size)
+    ctx.map(va, pa, level,
+            af=int(rng.random() < 0.85), el0=int(rng.random() < 0.8),
+            ro=int(rng.random() < 0.3), pxn=int(rng.random() < 0.2),
+            uxn=int(rng.random() < 0.2))
+
+
+def random_access(rng, span, targets, ctx=None):
     r = rng.random()
     if r < 0.75:
         va, size = rng.choice(targets)
@@ -445,21 +368,44 @@ def random_access(rng, span, targets):
     return va, length, rng.random() < 0.5, prot
 
 
-async def random_run(dut, backpressure, n_access):
-    b = Bench(dut)
+async def random_run(dut, backpressure, n_access, caches=False):
+    """Random tables with faulty entries, random accesses from six
+    streams plus bypass, abort, invalid and out-of-range StreamIDs.
+
+    With caches on, mappings are also changed now and then. Each change
+    is followed by an invalidation, as software must do, so the result
+    must still match the model for every access."""
+    b = Bench(dut, caches=caches)
     await b.start(backpressure)
     streams = {sid: build_random_stream(b, sid) for sid in range(1, 7)}
     write_ste(b.mem, b.strtab, 7, model.STE_CFG_BYPASS)
     write_ste(b.mem, b.strtab, 8, model.STE_CFG_ABORT)
 
     seen = {}
+    remaps = total_reads = predicted_reads = 0
+    recent = {}
     for _ in range(n_access):
+        if caches and b.rng.random() < 0.05:
+            if b.rng.random() < 0.8:
+                remap_random_leaf(b, streams[b.rng.randint(1, 6)][2])
+                remaps += 1
+            await b.env.invalidate_all()
         sid = b.rng.choice([1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 7, 8, 9, 40])
-        if sid in streams:
+        if sid in streams and caches and sid in recent and b.rng.random() < 0.4:
+            # locality: the same page again, or a neighbour in the same 2 MB region
+            va = recent[sid]
+            if b.rng.random() < 0.5:
+                va = (va & ~0x1F_FFFF) | (b.rng.randrange(512) << 12) | (va & 0xFFF)
+            length = min(b.rng.randint(1, 64), 0x1000 - (va & 0xFFF))
+            write, prot = b.rng.random() < 0.5, b.rng.choice([UNPRIV, PRIV])
+        elif sid in streams:
             va, length, write, prot = random_access(b.rng, *streams[sid])
         else:
             va, length, write, prot = random_access(b.rng, 1 << 48, [(DATA_HI, 1 << 20)])
         exp = await b.access(sid=sid, va=va, length=length, write=write, prot=prot)
+        recent[sid] = va
+        total_reads += b.last_reads
+        predicted_reads += exp.reads
         key = (exp.fault, exp.fcode)
         seen[key] = seen.get(key, 0) + 1
 
@@ -470,6 +416,15 @@ async def random_run(dut, backpressure, n_access):
                  model.FC_PERMISSION, model.FC_BAD_STE, model.FC_BAD_STREAMID):
         assert (True, code) in seen, f"random test never hit {model.FC_NAMES[code]}"
     assert seen.get((False, model.FC_NONE), 0) > n_access // 10
+
+    dut._log.info("table reads: %d made, %d without caches; %d remaps",
+                  total_reads, predicted_reads, remaps)
+    if caches:
+        c = await b.env.counters()
+        dut._log.info("counters: %s", c)
+        assert c["tlb_hit"] > 0 and c["cfg_hit"] > 0 and c["wc_hit"] > 0, c
+        assert remaps > 0
+        assert total_reads < predicted_reads
 
 
 @cocotb.test()
@@ -483,10 +438,29 @@ async def random_tables_against_model_with_backpressure(dut):
 
 
 @cocotb.test()
+async def random_tables_against_model_cached(dut):
+    await random_run(dut, None, 600, caches=True)
+
+
+@cocotb.test()
+async def random_tables_against_model_cached_with_backpressure(dut):
+    await random_run(dut, 0.3, 300, caches=True)
+
+
+@cocotb.test()
 async def concurrent_streams(dut):
+    await concurrent_run(dut, caches=False)
+
+
+@cocotb.test()
+async def concurrent_streams_cached(dut):
+    await concurrent_run(dut, caches=True)
+
+
+async def concurrent_run(dut, caches):
     """Reads and writes from four streams at once, with stalls. Checks
     outcome and data; the per-access fault code is covered above."""
-    b = Bench(dut)
+    b = Bench(dut, caches=caches)
     await b.start(0.25)
     rng = b.rng
     pages = 24

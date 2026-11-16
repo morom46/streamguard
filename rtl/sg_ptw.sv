@@ -25,6 +25,11 @@
 //
 // Hierarchical attributes in table descriptors (APTable, XNTable) are
 // not applied.
+//
+// Walk cache support: with start_l3 set the walk begins at level 3 in
+// l3_table, skipping the three upper reads. The walker reports the
+// level 3 table it passed through (l3tab) so it can be cached, and the
+// leaf descriptor it ended on (leaf_desc) so the TLB can be filled.
 
 module sg_ptw #(
   parameter int unsigned ADDR_W = 48
@@ -41,12 +46,17 @@ module sg_ptw #(
   input  logic              affd,
   input  logic              is_write,
   input  logic [2:0]        prot,         // AxPROT of the access
+  input  logic              start_l3,     // walk cache hit: start at level 3
+  input  logic [47:12]      l3_table,
 
   // Result, valid in the cycle done is high
   output logic              done,
   output logic [7:0]        fcode,        // sg_pkg::FC_NONE when successful
   output logic [1:0]        flevel,
   output logic [ADDR_W-1:0] pa,
+  output logic [63:0]       leaf_desc,    // last descriptor read
+  output logic              l3tab_valid,  // walk passed a level 2 table entry
+  output logic [47:12]      l3tab,        // ... pointing at this level 3 table
 
   // Table memory read
   output logic              mem_req,
@@ -101,8 +111,6 @@ module sg_ptw #(
   // ---------------- descriptor decode ----------------
   logic desc_valid, desc_is_table, desc_is_leaf, desc_reserved;
   logic addr_size_bad, af_bad, perm_bad;
-  logic privileged, instruction;
-
   assign desc_valid    = desc_q[sg_pkg::DESC_VALID];
   // bit 1 set: next-level table at levels 0-2, page at level 3
   assign desc_is_table = desc_valid &  desc_q[sg_pkg::DESC_TABLE] & (level_q != 2'd3);
@@ -116,18 +124,15 @@ module sg_ptw #(
   assign addr_size_bad = (desc_q[51:48] != 4'b0);
   assign af_bad        = ~desc_q[sg_pkg::DESC_AF] & ~affd;
 
-  assign privileged    = prot[0];
-  assign instruction   = prot[2];
-
-  always_comb begin
-    perm_bad = 1'b0;
-    if (is_write && desc_q[sg_pkg::DESC_AP2])    perm_bad = 1'b1;   // read-only
-    if (!privileged && !desc_q[sg_pkg::DESC_AP1]) perm_bad = 1'b1;  // no EL0 access
-    if (instruction && !is_write) begin
-      if ( privileged && desc_q[sg_pkg::DESC_PXN]) perm_bad = 1'b1;
-      if (!privileged && desc_q[sg_pkg::DESC_UXN]) perm_bad = 1'b1;
-    end
-  end
+  sg_perm u_perm (
+    .is_write (is_write),
+    .prot     (prot),
+    .ap1      (desc_q[sg_pkg::DESC_AP1]),
+    .ap2      (desc_q[sg_pkg::DESC_AP2]),
+    .pxn      (desc_q[sg_pkg::DESC_PXN]),
+    .uxn      (desc_q[sg_pkg::DESC_UXN]),
+    .denied   (perm_bad)
+  );
 
   // Output address: descriptor supplies the upper bits, the input
   // address supplies the offset inside the page or block.
@@ -141,7 +146,8 @@ module sg_ptw #(
   end
 
   // ---------------- control ----------------
-  assign done = (state_q == W_DONE);
+  assign done      = (state_q == W_DONE);
+  assign leaf_desc = desc_q;
 
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -153,13 +159,16 @@ module sg_ptw #(
       fcode      <= sg_pkg::FC_NONE;
       flevel     <= 2'd0;
       pa         <= '0;
+      l3tab_valid <= 1'b0;
+      l3tab      <= '0;
     end else begin
       case (state_q)
         W_IDLE: begin
           if (start) begin
-            level_q <= start_level;
-            table_q <= ttb;
-            flevel  <= start_level;
+            level_q     <= start_l3 ? 2'd3 : start_level;
+            table_q     <= start_l3 ? l3_table : ttb;
+            flevel      <= start_level;
+            l3tab_valid <= 1'b0;
             if (va_out_of_range) begin
               fcode   <= sg_pkg::FC_TRANSLATION;
               state_q <= W_DONE;
@@ -191,6 +200,10 @@ module sg_ptw #(
           end else if (addr_size_bad) begin
             fcode <= sg_pkg::FC_ADDR_SIZE;
           end else if (desc_is_table) begin
+            if (level_q == 2'd2) begin
+              l3tab_valid <= 1'b1;
+              l3tab       <= desc_q[47:12];
+            end
             table_q <= desc_q[47:12];
             level_q <= level_q + 2'd1;
             state_q <= W_READ;

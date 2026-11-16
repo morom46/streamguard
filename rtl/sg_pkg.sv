@@ -20,6 +20,20 @@ package sg_pkg;
   localparam logic [16:0] REG_STRTAB_BASE_HI  = 17'h00084;
   localparam logic [16:0] REG_STRTAB_BASE_CFG = 17'h00088;
 
+  // StreamGuard-specific registers, in the implementation defined
+  // part of page 0
+  localparam logic [16:0] REG_SG_CTRL      = 17'h00E00;
+  localparam logic [16:0] REG_SG_INV       = 17'h00E04;
+  localparam logic [16:0] REG_SG_TLB_HIT   = 17'h00E10;
+  localparam logic [16:0] REG_SG_TLB_MISS  = 17'h00E14;
+  localparam logic [16:0] REG_SG_WC_HIT    = 17'h00E18;
+  localparam logic [16:0] REG_SG_CFG_HIT   = 17'h00E1C;
+  localparam logic [16:0] REG_SG_CFG_MISS  = 17'h00E20;
+
+  localparam int unsigned SG_CTRL_CACHE_DIS = 0;
+  localparam int unsigned SG_INV_ALL        = 0;
+  localparam int unsigned SG_INV_COUNTERS   = 1;
+
   // CR0 / CR0ACK bit positions
   localparam int unsigned CR0_SMMUEN  = 0;
   localparam int unsigned CR0_EVENTQEN = 2;
@@ -67,6 +81,8 @@ package sg_pkg;
   localparam int unsigned CD_V        = 31;
   localparam int unsigned CD_AFFD     = 35;
   localparam int unsigned CD_AA64     = 41;
+  localparam int unsigned CD_ASID_LSB = 48;      // ASID[15:0] at [63:48];
+                                                 // 8-bit ASIDs use [55:48]
 
   // ---------------------------------------------------------------
   // Translation table descriptor (VMSAv8-64, stage 1, 4 KB granule)

@@ -3,7 +3,8 @@
 import cocotb
 
 from sg_env import (CR0, CR0ACK, GBPA, GBPA_ABORT, GBPA_UPDATE, IDR0, IDR1,
-                    IDR5, STRTAB_BASE, STRTAB_BASE_CFG, STRTAB_BASE_HI, Env)
+                    IDR5, SG_COUNTERS, SG_CTRL, SG_INV, STRTAB_BASE,
+                    STRTAB_BASE_CFG, STRTAB_BASE_HI, Env)
 
 
 @cocotb.test()
@@ -78,6 +79,24 @@ async def strtab_base_registers(dut):
     assert await env.apb.read(STRTAB_BASE) == 0xFFFFFFC0
     assert await env.apb.read(STRTAB_BASE_HI) == 0x0000FFFF
     assert await env.apb.read(STRTAB_BASE_CFG) == 0x3F
+
+
+@cocotb.test()
+async def cache_control_registers(dut):
+    """SG_CTRL keeps CACHE_DIS only; SG_INV and the counters read as zero
+    after reset and ignore writes other than SG_INV's action bits."""
+    env = Env(dut)
+    await env.reset()
+    assert await env.apb.read(SG_CTRL) == 0
+    await env.apb.write(SG_CTRL, 0xFFFFFFFF)
+    assert await env.apb.read(SG_CTRL) == 1
+    await env.apb.write(SG_CTRL, 0)
+    assert await env.apb.read(SG_CTRL) == 0
+    await env.apb.write(SG_INV, 0xFFFFFFFF)
+    assert await env.apb.read(SG_INV) == 0
+    for off in SG_COUNTERS.values():
+        await env.apb.write(off, 0xFFFFFFFF)
+        assert await env.apb.read(off) == 0
 
 
 @cocotb.test()

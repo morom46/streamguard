@@ -18,13 +18,14 @@ contains no Arm IP. What is and is not implemented is listed in
 | Milestone | Content | State |
 |---|---|---|
 | 1 | APB register block, AXI4 bypass path, terminate with SLVERR | done |
-| 2 | Hardware page table walker (AArch64, 4 KB granule) | planned |
-| 3 | TLB and walk cache, stream table and context descriptor lookup | planned |
+| 2 | Stream table and context descriptor lookup, page table walker (AArch64, 4 KB granule, 2 MB and 1 GB blocks) | done |
+| 3 | TLB, walk cache and configuration cache | planned |
 | 4 | Command queue (invalidation) and event queue (fault records) | planned |
 | 5 | Reference model, functional coverage, formal properties | planned |
 | 6 | TLB sizing study with synthesis area | planned |
 
-Milestone 1 regression: 17 tests, passing on 8 random seeds.
+Regression: 33 tests, passing on 8 random seeds. Every translated access is
+checked against a Python reference model.
 
 ## Quick start
 

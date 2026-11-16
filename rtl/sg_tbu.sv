@@ -122,6 +122,7 @@ module sg_tbu #(
   output logic [ADDR_W-1:0]   x_req_addr,
   output logic [SID_W-1:0]    x_req_sid,
   output logic                x_req_write,
+  output logic [2:0]          x_req_prot,
   input  logic                x_rsp_valid,
   input  logic                x_rsp_fault,
   input  logic [ADDR_W-1:0]   x_rsp_addr
@@ -223,6 +224,8 @@ module sg_tbu #(
   assign x_req_addr    = arb_pick_wr ? aw_xreq_addr : ar_xreq_addr;
   assign x_req_sid     = arb_pick_wr ? aw_xreq_sid  : ar_xreq_sid;
   assign x_req_write   = arb_pick_wr;
+  // AxPROT of the request being translated (held in the handler)
+  assign x_req_prot    = arb_pick_wr ? m_axi_awprot : m_axi_arprot;
 
   assign aw_xreq_ready = ~arb_busy_q &  arb_pick_wr & x_req_ready;
   assign ar_xreq_ready = ~arb_busy_q & ~arb_pick_wr & ar_xreq_valid & x_req_ready;

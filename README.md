@@ -17,14 +17,16 @@ contains no Arm IP. What is and is not implemented is listed in
 
 | Milestone | Content | State |
 |---|---|---|
-| 1 | APB register block, AXI4 bypass path, terminate with SLVERR | in progress |
+| 1 | APB register block, AXI4 bypass path, terminate with SLVERR | done |
 | 2 | Hardware page table walker (AArch64, 4 KB granule) | planned |
 | 3 | TLB and walk cache, stream table and context descriptor lookup | planned |
 | 4 | Command queue (invalidation) and event queue (fault records) | planned |
 | 5 | Reference model, functional coverage, formal properties | planned |
 | 6 | TLB sizing study with synthesis area | planned |
 
-## Tool setup
+Milestone 1 regression: 17 tests, passing on 8 random seeds.
+
+## Quick start
 
 Needs Python 3.10+, `make`, `g++` and `perl`. On Ubuntu or WSL:
 
@@ -32,7 +34,14 @@ Needs Python 3.10+, `make`, `g++` and `perl`. On Ubuntu or WSL:
 sudo apt install python3-venv build-essential perl
 ./scripts/setup_tools.sh
 source .venv/bin/activate
+
+make lint     # Verilator lint
+make test     # cocotb regression
+make synth    # Yosys generic synthesis, prints a cell report
 ```
+
+Waveforms: `make -C tb WAVES=1` writes `tb/dump.fst` (open with GTKWave or Surfer).
+A fixed seed: `COCOTB_RANDOM_SEED=3 make test`.
 
 ## Layout
 
@@ -46,3 +55,4 @@ scripts/  tool setup
 ## Documents
 
 - [Architecture](docs/architecture.md): block diagram, interfaces, register map, design decisions
+- [Verification plan](docs/verification_plan.md): what is tested, how, and current results

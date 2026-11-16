@@ -1,0 +1,8 @@
+.venv/
+build/
+tb/sim_build/
+tb/results.xml
+tb/*.fst
+tb/*.vcd
+__pycache__/
+*.pyc

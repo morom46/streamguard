@@ -10,11 +10,12 @@ import random
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge
-from cocotbext.axi import AxiBus, AxiMaster, AxiRam
+from cocotbext.axi import AxiBus, AxiMaster, AxiRam, AxiRamRead, AxiReadBus
 
 # Register offsets (must match rtl/sg_pkg.sv)
 IDR0, IDR1, IDR5 = 0x00, 0x04, 0x14
 CR0, CR0ACK, GBPA = 0x20, 0x24, 0x44
+STRTAB_BASE, STRTAB_BASE_HI, STRTAB_BASE_CFG = 0x80, 0x84, 0x88
 
 CR0_SMMUEN = 1 << 0
 CR0_EVENTQEN = 1 << 2
@@ -22,7 +23,10 @@ CR0_CMDQEN = 1 << 3
 GBPA_ABORT = 1 << 20
 GBPA_UPDATE = 1 << 31
 
+# The memory model is sparse and covers the whole 48-bit space. The
+# bypass tests only use (and compare) the first RAM_SIZE bytes.
 RAM_SIZE = 1 << 16
+MEM_SIZE = 1 << 48
 
 
 class Apb:
@@ -96,7 +100,12 @@ class Env:
         self.axi = AxiMaster(AxiBus.from_prefix(dut, "s_axi"), dut.clk,
                              dut.rst_n, reset_active_level=False)
         self.ram = AxiRam(AxiBus.from_prefix(dut, "m_axi"), dut.clk,
-                          dut.rst_n, reset_active_level=False, size=RAM_SIZE)
+                          dut.rst_n, reset_active_level=False, size=MEM_SIZE)
+        # Table fetches read the same physical memory through their own port
+        self.tram = AxiRamRead(AxiReadBus.from_prefix(dut, "t_axi"), dut.clk,
+                               dut.rst_n, reset_active_level=False,
+                               mem=self.ram.mem)
+        self.table_reads = 0
 
         # Every address request that reaches downstream: (kind, addr, id)
         self.downstream = []
@@ -117,6 +126,8 @@ class Env:
                     ("R", int(d.m_axi_araddr.value), int(d.m_axi_arid.value)))
             if int(d.m_axi_wvalid.value) and int(d.m_axi_wready.value):
                 self.w_beats += 1
+            if int(d.t_axi_arvalid.value) and int(d.t_axi_arready.value):
+                self.table_reads += 1
 
     async def reset(self):
         self.dut.rst_n.value = 0
@@ -137,12 +148,19 @@ class Env:
         self.ram.write_if.b_channel.set_pause_generator(random_pause(r, p_down))
         self.ram.read_if.ar_channel.set_pause_generator(random_pause(r, p_down))
         self.ram.read_if.r_channel.set_pause_generator(random_pause(r, p_down))
+        self.tram.ar_channel.set_pause_generator(random_pause(r, p_down))
+        self.tram.r_channel.set_pause_generator(random_pause(r, p_down))
 
     # ---- register helpers -------------------------------------------
     async def set_gbpa_abort(self, abort):
         await self.apb.write(GBPA, GBPA_UPDATE | (GBPA_ABORT if abort else 0))
         while (await self.apb.read(GBPA)) & GBPA_UPDATE:
             pass
+
+    async def set_strtab(self, base, log2size):
+        await self.apb.write(STRTAB_BASE, base & 0xFFFFFFFF)
+        await self.apb.write(STRTAB_BASE_HI, base >> 32)
+        await self.apb.write(STRTAB_BASE_CFG, log2size)
 
     async def set_cr0(self, value):
         await self.apb.write(CR0, value)

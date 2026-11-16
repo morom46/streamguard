@@ -7,12 +7,14 @@
 SIM              ?= verilator
 TOPLEVEL_LANG    ?= verilog
 COCOTB_TOPLEVEL  ?= streamguard
-COCOTB_TEST_MODULES ?= test_regs,test_bypass
+COCOTB_TEST_MODULES ?= test_regs,test_bypass,test_translate
 
 RTL := $(abspath ../rtl)
 VERILOG_SOURCES := $(RTL)/sg_pkg.sv \
                    $(RTL)/sg_valid_stable.sv \
                    $(RTL)/sg_apb_regs.sv \
+                   $(RTL)/sg_memrd.sv \
+                   $(RTL)/sg_ptw.sv \
                    $(RTL)/sg_xlate.sv \
                    $(RTL)/sg_addr_chan.sv \
                    $(RTL)/sg_tbu.sv \

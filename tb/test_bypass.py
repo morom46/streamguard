@@ -1,11 +1,11 @@
-"""Datapath tests for milestone 1: bypass and terminate.
+"""Datapath tests with the unit disabled: bypass and terminate.
 
 Policy under test (rtl/sg_xlate.sv):
 
     SMMUEN  GBPA.ABORT   result
       0         0        bypass, address and payload unchanged
       0         1        terminated with SLVERR, nothing goes downstream
-      1         x        terminated (translation not implemented yet)
+      1         x        translated (see test_translate.py)
 """
 
 import cocotb
@@ -162,8 +162,9 @@ async def gbpa_abort_terminates_with_backpressure(dut):
 
 
 @cocotb.test()
-async def enabled_without_translation_fails_closed(dut):
-    """SMMUEN=1 with no translation logic yet: everything is terminated."""
+async def enabled_but_unconfigured_fails_closed(dut):
+    """SMMUEN=1 with no stream table set up: the entry read back is not
+    valid, so everything is terminated."""
     env = Env(dut)
     await env.reset()
     await env.set_cr0(CR0_SMMUEN)

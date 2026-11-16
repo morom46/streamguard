@@ -1,7 +1,8 @@
 // StreamGuard - translation buffer unit (datapath).
 //
 // Sits in-line on an AXI4 link between a device (upstream, s_axi_*)
-// and the memory system (downstream, m_axi_*).
+// and the memory system (downstream, m_axi_*). The StreamID of each
+// request is carried on AWUSER / ARUSER.
 //
 //   * AW and AR each go through an address channel handler that gets
 //     a forward/terminate decision from the translation logic.
@@ -37,7 +38,7 @@ module sg_tbu #(
   input  logic [3:0]          s_axi_awcache,
   input  logic [2:0]          s_axi_awprot,
   input  logic [3:0]          s_axi_awqos,
-  input  logic [SID_W-1:0]    s_axi_awsid,
+  input  logic [SID_W-1:0]    s_axi_awuser,
   input  logic                s_axi_awvalid,
   output logic                s_axi_awready,
 
@@ -61,7 +62,7 @@ module sg_tbu #(
   input  logic [3:0]          s_axi_arcache,
   input  logic [2:0]          s_axi_arprot,
   input  logic [3:0]          s_axi_arqos,
-  input  logic [SID_W-1:0]    s_axi_arsid,
+  input  logic [SID_W-1:0]    s_axi_aruser,
   input  logic                s_axi_arvalid,
   output logic                s_axi_arready,
 
@@ -121,6 +122,7 @@ module sg_tbu #(
   output logic [ADDR_W-1:0]   x_req_addr,
   output logic [SID_W-1:0]    x_req_sid,
   output logic                x_req_write,
+  output logic [2:0]          x_req_prot,
   input  logic                x_rsp_valid,
   input  logic                x_rsp_fault,
   input  logic [ADDR_W-1:0]   x_rsp_addr
@@ -163,7 +165,7 @@ module sg_tbu #(
     .s_valid     (s_axi_awvalid),
     .s_ready     (s_axi_awready),
     .s_addr      (s_axi_awaddr),
-    .s_sid       (s_axi_awsid),
+    .s_sid       (s_axi_awuser),
     .s_pay       (aw_s_pay),
     .x_req_valid (aw_xreq_valid),
     .x_req_ready (aw_xreq_ready),
@@ -189,7 +191,7 @@ module sg_tbu #(
     .s_valid     (s_axi_arvalid),
     .s_ready     (s_axi_arready),
     .s_addr      (s_axi_araddr),
-    .s_sid       (s_axi_arsid),
+    .s_sid       (s_axi_aruser),
     .s_pay       (ar_s_pay),
     .x_req_valid (ar_xreq_valid),
     .x_req_ready (ar_xreq_ready),
@@ -222,6 +224,8 @@ module sg_tbu #(
   assign x_req_addr    = arb_pick_wr ? aw_xreq_addr : ar_xreq_addr;
   assign x_req_sid     = arb_pick_wr ? aw_xreq_sid  : ar_xreq_sid;
   assign x_req_write   = arb_pick_wr;
+  // AxPROT of the request being translated (held in the handler)
+  assign x_req_prot    = arb_pick_wr ? m_axi_awprot : m_axi_arprot;
 
   assign aw_xreq_ready = ~arb_busy_q &  arb_pick_wr & x_req_ready;
   assign ar_xreq_ready = ~arb_busy_q & ~arb_pick_wr & ar_xreq_valid & x_req_ready;

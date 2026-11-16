@@ -8,6 +8,8 @@
 RTL_SRCS := rtl/sg_pkg.sv \
             rtl/sg_valid_stable.sv \
             rtl/sg_apb_regs.sv \
+            rtl/sg_memrd.sv \
+            rtl/sg_ptw.sv \
             rtl/sg_xlate.sv \
             rtl/sg_addr_chan.sv \
             rtl/sg_tbu.sv \

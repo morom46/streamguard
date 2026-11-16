@@ -5,6 +5,8 @@
 //
 //   s_axi_*  AXI4 from the device whose accesses are being policed
 //   m_axi_*  AXI4 towards the memory system
+//   t_axi_*  AXI4 read channels used to fetch stream table entries,
+//            context descriptors and translation tables
 //   s_apb_*  APB4 programming interface
 //
 // See docs/architecture.md for the block diagram and milestone plan.
@@ -28,7 +30,7 @@ module streamguard #(
   input  logic [3:0]          s_axi_awcache,
   input  logic [2:0]          s_axi_awprot,
   input  logic [3:0]          s_axi_awqos,
-  input  logic [SID_W-1:0]    s_axi_awsid,
+  input  logic [SID_W-1:0]    s_axi_awuser,
   input  logic                s_axi_awvalid,
   output logic                s_axi_awready,
 
@@ -52,7 +54,7 @@ module streamguard #(
   input  logic [3:0]          s_axi_arcache,
   input  logic [2:0]          s_axi_arprot,
   input  logic [3:0]          s_axi_arqos,
-  input  logic [SID_W-1:0]    s_axi_arsid,
+  input  logic [SID_W-1:0]    s_axi_aruser,
   input  logic                s_axi_arvalid,
   output logic                s_axi_arready,
 
@@ -107,6 +109,22 @@ module streamguard #(
   output logic                m_axi_rready,
 
 
+  // ---------------- table memory read port ----------------
+  output logic                t_axi_arid,
+  output logic [ADDR_W-1:0]   t_axi_araddr,
+  output logic [7:0]          t_axi_arlen,
+  output logic [2:0]          t_axi_arsize,
+  output logic [1:0]          t_axi_arburst,
+  output logic [2:0]          t_axi_arprot,
+  output logic                t_axi_arvalid,
+  input  logic                t_axi_arready,
+  input  logic                t_axi_rid,
+  input  logic [63:0]         t_axi_rdata,
+  input  logic [1:0]          t_axi_rresp,
+  input  logic                t_axi_rlast,
+  input  logic                t_axi_rvalid,
+  output logic                t_axi_rready,
+
   // ---------------- APB4 programming interface ----------------
   input  logic [16:0]         s_apb_paddr,
   input  logic                s_apb_psel,
@@ -121,7 +139,13 @@ module streamguard #(
 
   logic              smmuen, cmdqen, eventqen, gbpa_abort;
 
+  logic [47:6]       strtab_base;
+  logic [5:0]        strtab_log2size;
+
   logic              x_req_valid, x_req_ready, x_req_write;
+  logic [2:0]        x_req_prot;
+  logic [7:0]        x_rsp_fcode;
+  logic [1:0]        x_rsp_flevel;
   logic [ADDR_W-1:0] x_req_addr;
   logic [SID_W-1:0]  x_req_sid;
   logic              x_rsp_valid, x_rsp_fault;
@@ -141,7 +165,9 @@ module streamguard #(
     .smmuen_o     (smmuen),
     .cmdqen_o     (cmdqen),
     .eventqen_o   (eventqen),
-    .gbpa_abort_o (gbpa_abort)
+    .gbpa_abort_o (gbpa_abort),
+    .strtab_base_o     (strtab_base),
+    .strtab_log2size_o (strtab_log2size)
   );
 
   sg_tbu #(
@@ -157,7 +183,7 @@ module streamguard #(
     .s_axi_awcache (s_axi_awcache),
     .s_axi_awprot  (s_axi_awprot),
     .s_axi_awqos   (s_axi_awqos),
-    .s_axi_awsid   (s_axi_awsid),
+    .s_axi_awuser   (s_axi_awuser),
     .s_axi_awvalid (s_axi_awvalid),
     .s_axi_awready (s_axi_awready),
     .s_axi_wdata   (s_axi_wdata),
@@ -178,7 +204,7 @@ module streamguard #(
     .s_axi_arcache (s_axi_arcache),
     .s_axi_arprot  (s_axi_arprot),
     .s_axi_arqos   (s_axi_arqos),
-    .s_axi_arsid   (s_axi_arsid),
+    .s_axi_aruser   (s_axi_aruser),
     .s_axi_arvalid (s_axi_arvalid),
     .s_axi_arready (s_axi_arready),
     .s_axi_rid     (s_axi_rid),
@@ -225,6 +251,7 @@ module streamguard #(
     .m_axi_rvalid  (m_axi_rvalid),
     .m_axi_rready  (m_axi_rready),
     .x_req_valid, .x_req_ready, .x_req_addr, .x_req_sid, .x_req_write,
+    .x_req_prot,
     .x_rsp_valid, .x_rsp_fault, .x_rsp_addr
   );
 
@@ -232,18 +259,26 @@ module streamguard #(
     .clk, .rst_n,
     .smmuen_i     (smmuen),
     .gbpa_abort_i (gbpa_abort),
+    .strtab_base_i     (strtab_base),
+    .strtab_log2size_i (strtab_log2size),
     .req_valid    (x_req_valid),
     .req_ready    (x_req_ready),
     .req_addr     (x_req_addr),
     .req_sid      (x_req_sid),
     .req_write    (x_req_write),
+    .req_prot     (x_req_prot),
     .rsp_valid    (x_rsp_valid),
     .rsp_fault    (x_rsp_fault),
-    .rsp_addr     (x_rsp_addr)
+    .rsp_addr     (x_rsp_addr),
+    .rsp_fcode    (x_rsp_fcode),
+    .rsp_flevel   (x_rsp_flevel),
+    .t_axi_arid, .t_axi_araddr, .t_axi_arlen, .t_axi_arsize, .t_axi_arburst,
+    .t_axi_arprot, .t_axi_arvalid, .t_axi_arready,
+    .t_axi_rid, .t_axi_rdata, .t_axi_rresp, .t_axi_rlast, .t_axi_rvalid, .t_axi_rready
   );
 
-  // Queue enables are wired up when the queues arrive.
+  // Queue enables and the fault report are used when the queues arrive.
   logic unused;
-  assign unused = &{1'b0, cmdqen, eventqen};
+  assign unused = &{1'b0, cmdqen, eventqen, x_rsp_fcode, x_rsp_flevel};
 
 endmodule

@@ -3,7 +3,7 @@
 import cocotb
 
 from sg_env import (CR0, CR0ACK, GBPA, GBPA_ABORT, GBPA_UPDATE, IDR0, IDR1,
-                    IDR5, Env)
+                    IDR5, STRTAB_BASE, STRTAB_BASE_CFG, STRTAB_BASE_HI, Env)
 
 
 @cocotb.test()
@@ -68,10 +68,23 @@ async def gbpa_needs_update_bit(dut):
 
 
 @cocotb.test()
+async def strtab_base_registers(dut):
+    """Base address keeps bits [47:6] only; the config keeps LOG2SIZE."""
+    env = Env(dut)
+    await env.reset()
+    await env.apb.write(STRTAB_BASE, 0xFFFFFFFF)
+    await env.apb.write(STRTAB_BASE_HI, 0xFFFFFFFF)
+    await env.apb.write(STRTAB_BASE_CFG, 0xFFFFFFFF)
+    assert await env.apb.read(STRTAB_BASE) == 0xFFFFFFC0
+    assert await env.apb.read(STRTAB_BASE_HI) == 0x0000FFFF
+    assert await env.apb.read(STRTAB_BASE_CFG) == 0x3F
+
+
+@cocotb.test()
 async def unmapped_offsets_raz_wi(dut):
     env = Env(dut)
     await env.reset()
-    for addr in (0x08, 0x80, 0x90, 0xFFC, 0x100A8):
+    for addr in (0x08, 0x8C, 0x90, 0xFFC, 0x100A8):
         await env.apb.write(addr, 0xDEADBEEF)
         assert await env.apb.read(addr) == 0
     # and the write did not land anywhere it should not

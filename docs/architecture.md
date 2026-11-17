@@ -21,12 +21,14 @@ flowchart LR
     DEV[Device] -- "s_axi (AXI4, StreamID on AxUSER)" --> TBU
     subgraph StreamGuard
         TBU["sg_tbu<br/>address channel handlers<br/>W routing, terminate logic"]
-        XL["sg_xlate<br/>STE and CD lookup, checks"]
+        XL["sg_xlate<br/>lookup control, checks"]
+        C["caches<br/>config cache, TLB, walk cache"]
         PTW["sg_ptw<br/>page table walker"]
         MR["sg_memrd<br/>table read port"]
         REGS["sg_apb_regs<br/>CR0, GBPA, STRTAB_BASE"]
         TBU -- "request: addr, sid, write, prot" --> XL
         XL -- "response: fault, output addr, fault code" --> TBU
+        XL <--> C
         XL --> PTW
         XL --> MR
         PTW --> MR
@@ -93,9 +95,9 @@ terminations are the exception.
 
 ## 5. Translation lookup
 
-With SMMUEN set, every address request goes through the full lookup. Nothing
-is cached yet, so this is the slow, correct baseline the TLB will be measured
-against.
+With SMMUEN set, every address request is looked up. The flow below is the
+full lookup, done when nothing useful is cached; section 5.4 describes the
+caches that let most requests skip some or all of it.
 
 ```mermaid
 flowchart TD
@@ -156,11 +158,60 @@ of a burst covers all of its beats.
 Measured in simulation, request accepted to request forwarded, with a memory
 that answers without stalling:
 
-| Case | Table reads | Cycles |
-|---|---|---|
-| STE bypass | 1 | 9 |
-| 1 GB block (2-level walk) | 4 | 30 |
-| 4 KB page (4-level walk) | 6 | 42 |
+| Case | Table reads | Cycles, milestone 2 (no caches) | Cycles, milestone 3 |
+|---|---|---|---|
+| TLB hit | 0 | - | 4 |
+| Walk cache hit (config cached, other page in the same 2 MB region) | 1 | - | 12 |
+| STE bypass, configuration not cached | 1 | 9 | 10 |
+| 1 GB block, nothing cached | 4 | 30 | 32 |
+| 4 KB page, nothing cached | 6 | 42 | 44 |
+
+A lookup that misses everything costs 2 cycles more than before: one for the
+cache lookup and one to try the TLB again once the configuration is known.
+
+### 5.4 Caches
+
+Three small, fully associative caches sit in front of the memory reads:
+
+| Cache | Tag | Holds | Entries (default) | Saves |
+|---|---|---|---|---|
+| Configuration cache | StreamID | kind (abort, bypass, stage 1), ASID, T0SZ, AFFD, TTB0 | 4 | STE and CD reads |
+| TLB | ASID, VA (masked by the entry's level) | output address, level, AP[2:1], PXN, UXN | 8 | the whole walk |
+| Walk cache | ASID, VA[47:21] | address of the level 3 table | 4 | levels 0 to 2 of a walk |
+
+Lookup order: configuration (cache, or STE and CD from memory), then TLB with
+that configuration's ASID, then on a miss a walk that starts at level 3 when
+the walk cache hits.
+
+**What is cached.** Only results that did not fault, with one exception: a leaf
+that failed only the permission check is cached, because permissions are
+checked again on every hit against the access that hits. Translation, address
+size and access flag faults are not cached, so software that fixes such an
+entry does not have to invalidate. Configuration errors are not cached either.
+
+**Block entries.** A TLB entry records its level. A 2 MB entry compares
+VA[47:21] and takes VA[20:0] from the input; a 1 GB entry compares VA[47:30].
+
+**ASIDs.** TLB and walk cache entries are tagged with the ASID from the context
+descriptor, not with the StreamID. Two streams whose descriptors give the same
+ASID share entries, which is the architected meaning of an ASID: software must
+give separate address spaces separate ASIDs.
+
+**Replacement.** An entry holding the same translation is overwritten,
+otherwise the first empty entry is used, otherwise a round robin victim.
+
+**Invalidation.** Writing SG_INV.ALL clears all three caches. If the write
+arrives while a lookup is in progress, that lookup may hold table data read
+before the software change, so it finishes but fills nothing. Until the command
+queue exists, this register is the only way to invalidate; the command queue
+will add the architected TLBI and CFGI commands.
+
+**Disable.** SG_CTRL.CACHE_DIS makes every lookup miss and stops all fills, so
+the unit behaves exactly as milestone 2 did. The tests use it to check exact
+read counts.
+
+**Counters.** TLB hits and misses, walk cache hits, configuration cache hits
+and misses, counted per lookup and cleared by SG_INV.COUNTERS.
 
 ## 6. Register map
 
@@ -177,6 +228,9 @@ read as zero and ignore writes.
 | 0x0044 | GBPA | RW | ABORT [20], UPDATE [31] |
 | 0x0080 | STRTAB_BASE | RW | ADDR [47:6] (64-bit register, two APB words) |
 | 0x0088 | STRTAB_BASE_CFG | RW | LOG2SIZE [5:0]; format is always linear |
+| 0x0E00 | SG_CTRL | RW | CACHE_DIS [0] (StreamGuard-specific) |
+| 0x0E04 | SG_INV | WO | ALL [0]: invalidate all caches; COUNTERS [1]: clear counters. Reads 0 (StreamGuard-specific) |
+| 0x0E10 to 0x0E20 | SG_TLB_HIT, SG_TLB_MISS, SG_WC_HIT, SG_CFG_HIT, SG_CFG_MISS | RO | 32-bit event counters (StreamGuard-specific) |
 
 GBPA is only changed by a write that sets UPDATE. UPDATE reads as 1 until the
 new value is in effect.
@@ -200,6 +254,9 @@ relied on by a later milestone.
 | STE word 0: V, Config encodings, S1Fmt, S1ContextPtr | ch. 5 | pending |
 | CD words 0 and 1: field positions, validity rules | ch. 5 | pending |
 | Event numbers used as fault codes | ch. 7 | pending |
+| CD ASID field position, 8-bit ASID when IDR0.ASID16 = 0 | ch. 5 | pending |
+| 0x0E00 range of page 0 free for implementation defined registers | ch. 6 | pending |
+| TLB and walk cache tagging by ASID; what CMD_TLBI_* invalidate | ch. 3 and 4 | pending |
 | Which conditions record an event and which terminate silently | ch. 7 | pending |
 | Descriptor formats, fault priority | Arm ARM, VMSAv8-64 | pending |
 
@@ -218,6 +275,12 @@ relied on by a later milestone.
 | D9 | Fault codes are the SMMUv3 event numbers | The event queue can store them without a mapping table |
 | D10 | Only the STE and CD words that are used are read | Fewer memory reads per lookup; the unread fields are all out of scope |
 | D11 | StreamID carried on AxUSER | Standard AXI sideband, so any AXI requester can drive it |
+| D12 | Fully associative caches | Entries of different sizes (4 KB, 2 MB, 1 GB) can share one TLB without choosing an index per size; at 4 to 8 entries the compare logic is small |
+| D13 | TLB tagged by ASID, not StreamID | Matches the architecture and lets ASID-based invalidation commands work later |
+| D14 | Cache permission-faulting leaves, not other faults | Permissions are rechecked on every hit, so the entry stays correct for other access types; other faults must be seen again once software fixes the entry |
+| D15 | Invalidation during a lookup cancels that lookup's fills | Otherwise data read before the software change could be cached after the invalidation and served forever |
+| D16 | Cache disable bit | Exact read counts in tests, and a fallback for debugging |
+| D17 | One shared lookup state for cache hits and fresh configurations | After STE and CD are read the TLB is tried again, so a configuration-only miss does not force a walk |
 
 ## 8. Scope
 
@@ -227,7 +290,8 @@ descriptor per stream, ASID-tagged TLB, command queue with invalidation and
 sync commands, event queue with translation, permission and bad-StreamID
 faults.
 
-Out of scope: stage 2 and nested translation, the TTB1 region, hierarchical
+Out of scope: stage 2 and nested translation, the TTB1 region, the nG bit (all
+TLB entries are ASID-specific), hierarchical
 table attributes (APTable, XNTable), contiguous hint, Secure state, SubstreamIDs,
 two-level stream tables, 16 KB and 64 KB granules, stall fault model, PCIe
 ATS and PRI, MSIs, hardware access/dirty flag update, broadcast TLB

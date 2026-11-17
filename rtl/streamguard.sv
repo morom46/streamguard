@@ -15,7 +15,10 @@ module streamguard #(
   parameter int unsigned ADDR_W = 48,
   parameter int unsigned DATA_W = 64,
   parameter int unsigned ID_W   = 4,
-  parameter int unsigned SID_W  = 8
+  parameter int unsigned SID_W  = 8,
+  parameter int unsigned TLB_ENTRIES = 8,
+  parameter int unsigned WC_ENTRIES  = 4,
+  parameter int unsigned CFG_ENTRIES = 4
 ) (
   input  logic                clk,
   input  logic                rst_n,
@@ -142,6 +145,9 @@ module streamguard #(
   logic [47:6]       strtab_base;
   logic [5:0]        strtab_log2size;
 
+  logic              cache_dis, inv_all, cnt_clr;
+  logic [31:0]       cnt_tlb_hit, cnt_tlb_miss, cnt_wc_hit, cnt_cfg_hit, cnt_cfg_miss;
+
   logic              x_req_valid, x_req_ready, x_req_write;
   logic [2:0]        x_req_prot;
   logic [7:0]        x_rsp_fcode;
@@ -167,7 +173,15 @@ module streamguard #(
     .eventqen_o   (eventqen),
     .gbpa_abort_o (gbpa_abort),
     .strtab_base_o     (strtab_base),
-    .strtab_log2size_o (strtab_log2size)
+    .strtab_log2size_o (strtab_log2size),
+    .cache_dis_o       (cache_dis),
+    .inv_all_o         (inv_all),
+    .cnt_clr_o         (cnt_clr),
+    .cnt_tlb_hit_i     (cnt_tlb_hit),
+    .cnt_tlb_miss_i    (cnt_tlb_miss),
+    .cnt_wc_hit_i      (cnt_wc_hit),
+    .cnt_cfg_hit_i     (cnt_cfg_hit),
+    .cnt_cfg_miss_i    (cnt_cfg_miss)
   );
 
   sg_tbu #(
@@ -255,12 +269,23 @@ module streamguard #(
     .x_rsp_valid, .x_rsp_fault, .x_rsp_addr
   );
 
-  sg_xlate #(.ADDR_W(ADDR_W), .SID_W(SID_W)) u_xlate (
+  sg_xlate #(
+    .ADDR_W(ADDR_W), .SID_W(SID_W),
+    .TLB_ENTRIES(TLB_ENTRIES), .WC_ENTRIES(WC_ENTRIES), .CFG_ENTRIES(CFG_ENTRIES)
+  ) u_xlate (
     .clk, .rst_n,
     .smmuen_i     (smmuen),
     .gbpa_abort_i (gbpa_abort),
     .strtab_base_i     (strtab_base),
     .strtab_log2size_i (strtab_log2size),
+    .cache_dis_i       (cache_dis),
+    .inv_i             (inv_all),
+    .cnt_clr_i         (cnt_clr),
+    .cnt_tlb_hit_o     (cnt_tlb_hit),
+    .cnt_tlb_miss_o    (cnt_tlb_miss),
+    .cnt_wc_hit_o      (cnt_wc_hit),
+    .cnt_cfg_hit_o     (cnt_cfg_hit),
+    .cnt_cfg_miss_o    (cnt_cfg_miss),
     .req_valid    (x_req_valid),
     .req_ready    (x_req_ready),
     .req_addr     (x_req_addr),

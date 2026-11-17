@@ -4,8 +4,14 @@
 // registers. Unimplemented offsets are RAZ/WI, so PSLVERR is never
 // raised.
 //
-// Implements the ID registers, CR0/CR0ACK, GBPA and the stream table
-// base registers.
+// Implements the ID registers, CR0/CR0ACK, GBPA, the stream table
+// base registers, and StreamGuard-specific registers for the caches:
+//
+//   SG_CTRL   [0] CACHE_DIS: no lookups hit and nothing is filled
+//   SG_INV    write 1 to [0]: invalidate the TLB, walk cache and
+//             configuration cache; write 1 to [1]: clear the counters.
+//             Reads as zero.
+//   SG_*_HIT / _MISS   event counters, read only
 
 module sg_apb_regs (
   input  logic        clk,
@@ -30,12 +36,23 @@ module sg_apb_regs (
 
   // Stream table location: base address [47:6] and log2(entries)
   output logic [47:6] strtab_base_o,
-  output logic [5:0]  strtab_log2size_o
+  output logic [5:0]  strtab_log2size_o,
+
+  // Caches
+  output logic        cache_dis_o,
+  output logic        inv_all_o,          // one cycle pulse
+  output logic        cnt_clr_o,          // one cycle pulse
+  input  logic [31:0] cnt_tlb_hit_i,
+  input  logic [31:0] cnt_tlb_miss_i,
+  input  logic [31:0] cnt_wc_hit_i,
+  input  logic [31:0] cnt_cfg_hit_i,
+  input  logic [31:0] cnt_cfg_miss_i
 );
 
   logic [31:0] cr0_q, cr0ack_q;
   logic        gbpa_abort_q, gbpa_update_q;
   logic [31:0] strtab_lo_q, strtab_hi_q, strtab_cfg_q;
+  logic        cache_dis_q;
 
   logic        wr_en;
   logic [16:0] addr;
@@ -69,6 +86,7 @@ module sg_apb_regs (
       strtab_lo_q   <= '0;
       strtab_hi_q   <= '0;
       strtab_cfg_q  <= '0;
+      cache_dis_q   <= 1'b0;
     end else begin
       // CR0ACK follows CR0 one cycle later. Software is expected to
       // poll CR0ACK before relying on a CR0 change.
@@ -95,11 +113,18 @@ module sg_apb_regs (
             strtab_hi_q  <= strb_merge(strtab_hi_q, pwdata, pstrb) & 32'h0000_FFFF;
           sg_pkg::REG_STRTAB_BASE_CFG:
             strtab_cfg_q <= strb_merge(strtab_cfg_q, pwdata, pstrb) & 32'h0000_003F;
+          sg_pkg::REG_SG_CTRL:
+            if (pstrb[0]) cache_dis_q <= pwdata[sg_pkg::SG_CTRL_CACHE_DIS];
           default: ;
         endcase
       end
     end
   end
+
+  assign inv_all_o = wr_en && (addr == sg_pkg::REG_SG_INV) && pstrb[0] &&
+                     pwdata[sg_pkg::SG_INV_ALL];
+  assign cnt_clr_o = wr_en && (addr == sg_pkg::REG_SG_INV) && pstrb[0] &&
+                     pwdata[sg_pkg::SG_INV_COUNTERS];
 
   always_comb begin
     case (addr)
@@ -112,6 +137,12 @@ module sg_apb_regs (
       sg_pkg::REG_STRTAB_BASE_LO:  prdata = strtab_lo_q;
       sg_pkg::REG_STRTAB_BASE_HI:  prdata = strtab_hi_q;
       sg_pkg::REG_STRTAB_BASE_CFG: prdata = strtab_cfg_q;
+      sg_pkg::REG_SG_CTRL:         prdata = {31'b0, cache_dis_q};
+      sg_pkg::REG_SG_TLB_HIT:      prdata = cnt_tlb_hit_i;
+      sg_pkg::REG_SG_TLB_MISS:     prdata = cnt_tlb_miss_i;
+      sg_pkg::REG_SG_WC_HIT:       prdata = cnt_wc_hit_i;
+      sg_pkg::REG_SG_CFG_HIT:      prdata = cnt_cfg_hit_i;
+      sg_pkg::REG_SG_CFG_MISS:     prdata = cnt_cfg_miss_i;
       default:    prdata = '0;
     endcase
   end
@@ -125,5 +156,6 @@ module sg_apb_regs (
 
   assign strtab_base_o     = {strtab_hi_q[15:0], strtab_lo_q[31:6]};
   assign strtab_log2size_o = strtab_cfg_q[5:0];
+  assign cache_dis_o       = cache_dis_q;
 
 endmodule

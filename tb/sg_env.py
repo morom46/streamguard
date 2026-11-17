@@ -16,6 +16,12 @@ from cocotbext.axi import AxiBus, AxiMaster, AxiRam, AxiRamRead, AxiReadBus
 IDR0, IDR1, IDR5 = 0x00, 0x04, 0x14
 CR0, CR0ACK, GBPA = 0x20, 0x24, 0x44
 STRTAB_BASE, STRTAB_BASE_HI, STRTAB_BASE_CFG = 0x80, 0x84, 0x88
+SG_CTRL, SG_INV = 0xE00, 0xE04
+SG_COUNTERS = {"tlb_hit": 0xE10, "tlb_miss": 0xE14, "wc_hit": 0xE18,
+               "cfg_hit": 0xE1C, "cfg_miss": 0xE20}
+SG_CTRL_CACHE_DIS = 1 << 0
+SG_INV_ALL = 1 << 0
+SG_INV_COUNTERS = 1 << 1
 
 CR0_SMMUEN = 1 << 0
 CR0_EVENTQEN = 1 << 2
@@ -161,6 +167,18 @@ class Env:
         await self.apb.write(STRTAB_BASE, base & 0xFFFFFFFF)
         await self.apb.write(STRTAB_BASE_HI, base >> 32)
         await self.apb.write(STRTAB_BASE_CFG, log2size)
+
+    async def set_caches(self, enabled):
+        await self.apb.write(SG_CTRL, 0 if enabled else SG_CTRL_CACHE_DIS)
+
+    async def invalidate_all(self):
+        await self.apb.write(SG_INV, SG_INV_ALL)
+
+    async def clear_counters(self):
+        await self.apb.write(SG_INV, SG_INV_COUNTERS)
+
+    async def counters(self):
+        return {name: await self.apb.read(off) for name, off in SG_COUNTERS.items()}
 
     async def set_cr0(self, value):
         await self.apb.write(CR0, value)

@@ -7,6 +7,9 @@
 
 RTL_SRCS := rtl/sg_pkg.sv \
             rtl/sg_valid_stable.sv \
+            rtl/sg_perm.sv \
+            rtl/sg_tagcache.sv \
+            rtl/sg_tlb.sv \
             rtl/sg_apb_regs.sv \
             rtl/sg_memrd.sv \
             rtl/sg_ptw.sv \

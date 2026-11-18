@@ -7,6 +7,10 @@
 // Fill and invalidate follow the same rules as the TLB: overwrite an
 // entry with the same tag, else the first empty entry, else the round
 // robin victim; invalidate wins over a fill in the same cycle.
+//
+// inv_all clears every entry. inv_sel clears the entries whose tag
+// matches inv_tag in the bit positions set in inv_mask (a mask of all
+// zeros selects every entry).
 
 module sg_tagcache #(
   parameter int unsigned ENTRIES = 4,
@@ -17,6 +21,9 @@ module sg_tagcache #(
   input  logic              rst_n,
 
   input  logic              inv_all,
+  input  logic              inv_sel,
+  input  logic [TAG_W-1:0]  inv_tag,
+  input  logic [TAG_W-1:0]  inv_mask,
 
   input  logic [TAG_W-1:0]  lk_tag,
   output logic              hit,
@@ -79,6 +86,15 @@ module sg_tagcache #(
     victim       = found_dup ? dup_idx : found_free ? free_idx : rr_q;
   end
 
+  // ---------------- selective invalidation ----------------
+  logic [ENTRIES-1:0] inv_vec;
+
+  always_comb begin
+    for (int i = 0; i < ENTRIES; i++) begin
+      inv_vec[i] = (((tag_q[i] ^ inv_tag) & inv_mask) == '0);
+    end
+  end
+
   // ---------------- state ----------------
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -88,6 +104,8 @@ module sg_tagcache #(
       rr_q   <= '0;
     end else if (inv_all) begin
       v_q <= '0;
+    end else if (inv_sel) begin
+      v_q <= v_q & ~inv_vec;
     end else if (fill) begin
       v_q[victim]    <= 1'b1;
       tag_q[victim]  <= fill_tag;

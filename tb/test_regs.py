@@ -2,9 +2,12 @@
 
 import cocotb
 
-from sg_env import (CR0, CR0ACK, GBPA, GBPA_ABORT, GBPA_UPDATE, IDR0, IDR1,
-                    IDR5, SG_COUNTERS, SG_CTRL, SG_INV, STRTAB_BASE,
-                    STRTAB_BASE_CFG, STRTAB_BASE_HI, Env)
+from sg_env import (CMDQ_BASE, CMDQ_BASE_HI, CMDQ_CONS, CMDQ_PROD, CR0, CR0ACK,
+                    CR0_CMDQEN, CR0_EVENTQEN, EVENTQ_BASE, EVENTQ_BASE_HI,
+                    EVENTQ_CONS, EVENTQ_PROD, GBPA, GBPA_ABORT, GBPA_UPDATE,
+                    GERROR, GERRORN, IDR0, IDR1, IDR5, IRQ_CTRL, IRQ_CTRLACK,
+                    SG_COUNTERS, SG_CTRL, SG_INV, STRTAB_BASE, STRTAB_BASE_CFG,
+                    STRTAB_BASE_HI, Env)
 
 
 @cocotb.test()
@@ -103,9 +106,57 @@ async def cache_control_registers(dut):
 async def unmapped_offsets_raz_wi(dut):
     env = Env(dut)
     await env.reset()
-    for addr in (0x08, 0x8C, 0x90, 0xFFC, 0x100A8):
+    for addr in (0x08, 0x8C, 0xB0, 0xFFC, 0x10000, 0x100A0, 0x100B0):
         await env.apb.write(addr, 0xDEADBEEF)
         assert await env.apb.read(addr) == 0
     # and the write did not land anywhere it should not
     assert await env.apb.read(CR0) == 0
     assert await env.apb.read(GBPA) == 0
+
+
+@cocotb.test()
+async def queue_registers(dut):
+    """Queue base registers keep the implemented bits. The pointer the
+    hardware owns can only be written while its queue is disabled."""
+    env = Env(dut)
+    await env.reset()
+    for lo, hi in ((CMDQ_BASE, CMDQ_BASE_HI), (EVENTQ_BASE, EVENTQ_BASE_HI)):
+        await env.apb.write(lo, 0xFFFFFFFF)
+        await env.apb.write(hi, 0xFFFFFFFF)
+        assert await env.apb.read(lo) == 0xFFFFFFFF      # ADDR[31:5], LOG2SIZE
+        assert await env.apb.read(hi) == 0x0000FFFF      # ADDR[47:32]
+
+    # queues disabled: every pointer is writable
+    for reg in (CMDQ_PROD, CMDQ_CONS, EVENTQ_PROD, EVENTQ_CONS):
+        await env.apb.write(reg, 0x15)
+        assert await env.apb.read(reg) == 0x15
+    await env.apb.write(EVENTQ_PROD, 0x80000003)         # overflow flag
+    assert await env.apb.read(EVENTQ_PROD) == 0x80000003
+    await env.apb.write(EVENTQ_CONS, 0x80000003)         # overflow acknowledge
+    assert await env.apb.read(EVENTQ_CONS) == 0x80000003
+
+    # queues enabled, empty (PROD == CONS): hardware-owned pointers are read-only
+    await env.apb.write(CMDQ_PROD, 0x03)
+    await env.apb.write(CMDQ_CONS, 0x03)
+    await env.set_cr0(CR0_CMDQEN | CR0_EVENTQEN)
+    await env.apb.write(CMDQ_CONS, 0x0A)
+    await env.apb.write(EVENTQ_PROD, 0x0A)
+    assert await env.apb.read(CMDQ_CONS) == 0x03
+    assert await env.apb.read(EVENTQ_PROD) == 0x80000003
+    await env.apb.write(EVENTQ_CONS, 0x04)               # software's pointer
+    assert await env.apb.read(EVENTQ_CONS) == 0x04
+
+
+@cocotb.test()
+async def irq_and_error_registers(dut):
+    env = Env(dut)
+    await env.reset()
+    await env.apb.write(IRQ_CTRL, 0xFFFFFFFF)
+    assert await env.apb.read(IRQ_CTRL) == 0x5           # GERROR and EVENTQ enables
+    assert await env.apb.read(IRQ_CTRLACK) == 0x5
+    await env.apb.write(IRQ_CTRLACK, 0)
+    assert await env.apb.read(IRQ_CTRLACK) == 0x5        # read-only
+    await env.apb.write(GERROR, 0xFFFFFFFF)
+    assert await env.apb.read(GERROR) == 0               # read-only
+    await env.apb.write(GERRORN, 0xFFFFFFFF)
+    assert await env.apb.read(GERRORN) == 0x5            # CMDQ_ERR, EVENTQ_ABT_ERR

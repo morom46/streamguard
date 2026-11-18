@@ -7,8 +7,8 @@
 package sg_pkg;
 
   // ---------------------------------------------------------------
-  // Register offsets, page 0. PADDR is 17 bits so that page 1
-  // (EVENTQ_PROD/CONS at 0x100A8/0x100AC) is reachable later.
+  // Register offsets. PADDR is 17 bits so that page 1
+  // (EVENTQ_PROD/CONS at 0x100A8/0x100AC) is reachable.
   // ---------------------------------------------------------------
   localparam logic [16:0] REG_IDR0   = 17'h00000;
   localparam logic [16:0] REG_IDR1   = 17'h00004;
@@ -16,9 +16,53 @@ package sg_pkg;
   localparam logic [16:0] REG_CR0    = 17'h00020;
   localparam logic [16:0] REG_CR0ACK = 17'h00024;
   localparam logic [16:0] REG_GBPA   = 17'h00044;
+  localparam logic [16:0] REG_IRQ_CTRL    = 17'h00050;
+  localparam logic [16:0] REG_IRQ_CTRLACK = 17'h00054;
+  localparam logic [16:0] REG_GERROR      = 17'h00060;
+  localparam logic [16:0] REG_GERRORN     = 17'h00064;
   localparam logic [16:0] REG_STRTAB_BASE_LO  = 17'h00080;
   localparam logic [16:0] REG_STRTAB_BASE_HI  = 17'h00084;
   localparam logic [16:0] REG_STRTAB_BASE_CFG = 17'h00088;
+  localparam logic [16:0] REG_CMDQ_BASE_LO    = 17'h00090;
+  localparam logic [16:0] REG_CMDQ_BASE_HI    = 17'h00094;
+  localparam logic [16:0] REG_CMDQ_PROD       = 17'h00098;
+  localparam logic [16:0] REG_CMDQ_CONS       = 17'h0009C;
+  localparam logic [16:0] REG_EVENTQ_BASE_LO  = 17'h000A0;
+  localparam logic [16:0] REG_EVENTQ_BASE_HI  = 17'h000A4;
+  // page 1
+  localparam logic [16:0] REG_EVENTQ_PROD     = 17'h100A8;
+  localparam logic [16:0] REG_EVENTQ_CONS     = 17'h100AC;
+
+  // Largest queue: 2^4 entries (IDR1.CMDQS and IDR1.EVENTQS)
+  localparam logic [4:0] QUEUE_MAX_LOG2 = 5'd4;
+
+  // GERROR / GERRORN and IRQ_CTRL bit positions
+  localparam int unsigned GERROR_CMDQ_ERR   = 0;
+  localparam int unsigned GERROR_EVENTQ_ABT = 2;
+  localparam int unsigned IRQ_GERROR_EN     = 0;
+  localparam int unsigned IRQ_EVENTQ_EN     = 2;
+
+  // ---------------------------------------------------------------
+  // Commands (IHI 0070, chapter 4). 16 bytes each, opcode in [7:0]
+  // of the first word.
+  // ---------------------------------------------------------------
+  localparam logic [7:0] CMD_PREFETCH_CONFIG = 8'h01;
+  localparam logic [7:0] CMD_PREFETCH_ADDR   = 8'h02;
+  localparam logic [7:0] CMD_CFGI_STE        = 8'h03;
+  localparam logic [7:0] CMD_CFGI_STE_RANGE  = 8'h04;   // CFGI_ALL is Range = 31
+  localparam logic [7:0] CMD_CFGI_CD         = 8'h05;
+  localparam logic [7:0] CMD_CFGI_CD_ALL     = 8'h06;
+  localparam logic [7:0] CMD_TLBI_NH_ALL     = 8'h10;
+  localparam logic [7:0] CMD_TLBI_NH_ASID    = 8'h11;
+  localparam logic [7:0] CMD_TLBI_NH_VA      = 8'h12;
+  localparam logic [7:0] CMD_TLBI_NH_VAA     = 8'h13;
+  localparam logic [7:0] CMD_TLBI_NSNH_ALL   = 8'h30;
+  localparam logic [7:0] CMD_SYNC            = 8'h46;
+
+  // CMDQ_CONS.ERR codes
+  localparam logic [6:0] CERROR_NONE = 7'd0;
+  localparam logic [6:0] CERROR_ILL  = 7'd1;
+  localparam logic [6:0] CERROR_ABT  = 7'd2;
 
   // StreamGuard-specific registers, in the implementation defined
   // part of page 0
@@ -81,6 +125,7 @@ package sg_pkg;
   localparam int unsigned CD_V        = 31;
   localparam int unsigned CD_AFFD     = 35;
   localparam int unsigned CD_AA64     = 41;
+  localparam int unsigned CD_R        = 45;      // record stage 1 faults
   localparam int unsigned CD_ASID_LSB = 48;      // ASID[15:0] at [63:48];
                                                  // 8-bit ASIDs use [55:48]
 
@@ -97,7 +142,7 @@ package sg_pkg;
 
   // ---------------------------------------------------------------
   // Fault codes. The values are the SMMUv3 event numbers (IHI 0070,
-  // chapter 7), so the event queue can use them directly later.
+  // chapter 7), so the event queue stores them as they are.
   // FC_NONE with a fault means "terminated, no event recorded"
   // (global abort or STE.Config = abort).
   // ---------------------------------------------------------------
@@ -112,6 +157,12 @@ package sg_pkg;
   localparam logic [7:0] FC_ADDR_SIZE      = 8'h11;
   localparam logic [7:0] FC_ACCESS         = 8'h12;
   localparam logic [7:0] FC_PERMISSION     = 8'h13;
+
+  // Event record (32 bytes), second word, for translation-related
+  // faults: what kind of access faulted
+  localparam int unsigned EVT1_PNU = 33;         // privileged
+  localparam int unsigned EVT1_IND = 34;         // instruction
+  localparam int unsigned EVT1_RNW = 35;         // read
 
   // AXI response codes
   localparam logic [1:0] RESP_OKAY   = 2'b00;

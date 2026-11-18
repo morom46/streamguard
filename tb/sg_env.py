@@ -10,12 +10,20 @@ import random
 import cocotb
 from cocotb.clock import Clock
 from cocotb.triggers import ClockCycles, RisingEdge
-from cocotbext.axi import AxiBus, AxiMaster, AxiRam, AxiRamRead, AxiReadBus
+from cocotbext.axi import AxiBus, AxiMaster, AxiRam
 
 # Register offsets (must match rtl/sg_pkg.sv)
 IDR0, IDR1, IDR5 = 0x00, 0x04, 0x14
 CR0, CR0ACK, GBPA = 0x20, 0x24, 0x44
+IRQ_CTRL, IRQ_CTRLACK, GERROR, GERRORN = 0x50, 0x54, 0x60, 0x64
 STRTAB_BASE, STRTAB_BASE_HI, STRTAB_BASE_CFG = 0x80, 0x84, 0x88
+CMDQ_BASE, CMDQ_BASE_HI, CMDQ_PROD, CMDQ_CONS = 0x90, 0x94, 0x98, 0x9C
+EVENTQ_BASE, EVENTQ_BASE_HI = 0xA0, 0xA4
+EVENTQ_PROD, EVENTQ_CONS = 0x100A8, 0x100AC            # register page 1
+GERROR_CMDQ_ERR = 1 << 0
+GERROR_EVENTQ_ABT = 1 << 2
+IRQ_GERROR_EN = 1 << 0
+IRQ_EVENTQ_EN = 1 << 2
 SG_CTRL, SG_INV = 0xE00, 0xE04
 SG_COUNTERS = {"tlb_hit": 0xE10, "tlb_miss": 0xE14, "wc_hit": 0xE18,
                "cfg_hit": 0xE1C, "cfg_miss": 0xE20}
@@ -107,11 +115,14 @@ class Env:
                              dut.rst_n, reset_active_level=False)
         self.ram = AxiRam(AxiBus.from_prefix(dut, "m_axi"), dut.clk,
                           dut.rst_n, reset_active_level=False, size=MEM_SIZE)
-        # Table fetches read the same physical memory through their own port
-        self.tram = AxiRamRead(AxiReadBus.from_prefix(dut, "t_axi"), dut.clk,
-                               dut.rst_n, reset_active_level=False,
-                               mem=self.ram.mem)
-        self.table_reads = 0
+        # The unit's own port (table and command reads, event writes)
+        # reaches the same physical memory
+        self.tram = AxiRam(AxiBus.from_prefix(dut, "t_axi"), dut.clk,
+                           dut.rst_n, reset_active_level=False,
+                           mem=self.ram.mem)
+        self.table_reads = 0         # read requests on the unit's port
+        self.event_writes = 0        # write requests on the unit's port
+        self.irq = {"eventq": 0, "gerror": 0}
 
         # Every address request that reaches downstream: (kind, addr, id)
         self.downstream = []
@@ -134,6 +145,12 @@ class Env:
                 self.w_beats += 1
             if int(d.t_axi_arvalid.value) and int(d.t_axi_arready.value):
                 self.table_reads += 1
+            if int(d.t_axi_awvalid.value) and int(d.t_axi_awready.value):
+                self.event_writes += 1
+            if int(d.irq_eventq.value):
+                self.irq["eventq"] += 1
+            if int(d.irq_gerror.value):
+                self.irq["gerror"] += 1
 
     async def reset(self):
         self.dut.rst_n.value = 0
@@ -154,8 +171,11 @@ class Env:
         self.ram.write_if.b_channel.set_pause_generator(random_pause(r, p_down))
         self.ram.read_if.ar_channel.set_pause_generator(random_pause(r, p_down))
         self.ram.read_if.r_channel.set_pause_generator(random_pause(r, p_down))
-        self.tram.ar_channel.set_pause_generator(random_pause(r, p_down))
-        self.tram.r_channel.set_pause_generator(random_pause(r, p_down))
+        self.tram.read_if.ar_channel.set_pause_generator(random_pause(r, p_down))
+        self.tram.read_if.r_channel.set_pause_generator(random_pause(r, p_down))
+        self.tram.write_if.aw_channel.set_pause_generator(random_pause(r, p_down))
+        self.tram.write_if.w_channel.set_pause_generator(random_pause(r, p_down))
+        self.tram.write_if.b_channel.set_pause_generator(random_pause(r, p_down))
 
     # ---- register helpers -------------------------------------------
     async def set_gbpa_abort(self, abort):
@@ -167,6 +187,15 @@ class Env:
         await self.apb.write(STRTAB_BASE, base & 0xFFFFFFFF)
         await self.apb.write(STRTAB_BASE_HI, base >> 32)
         await self.apb.write(STRTAB_BASE_CFG, log2size)
+
+    async def set_queues(self, cmdq_base, evtq_base, log2size):
+        """Queue base registers: LOG2SIZE in [4:0], address above it.
+        Pointers start at zero."""
+        for reg, base in ((CMDQ_BASE, cmdq_base), (EVENTQ_BASE, evtq_base)):
+            await self.apb.write(reg, (base & 0xFFFFFFE0) | log2size)
+            await self.apb.write(reg + 4, base >> 32)
+        for reg in (CMDQ_PROD, CMDQ_CONS, EVENTQ_PROD, EVENTQ_CONS):
+            await self.apb.write(reg, 0)
 
     async def set_caches(self, enabled):
         await self.apb.write(SG_CTRL, 0 if enabled else SG_CTRL_CACHE_DIS)

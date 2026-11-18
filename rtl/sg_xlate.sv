@@ -24,12 +24,20 @@
 // fault is cached too, because the permission check runs again on
 // every hit against the access that hits.
 //
-// Invalidation (inv_i) clears all three caches at once. If it arrives
-// while a lookup is in progress, that lookup may already hold table
-// data read before the software change, so it fills nothing.
+// Invalidation. Commands from the command queue (sg_cmdq) run only
+// between lookups: a waiting command is taken before the next request,
+// and no request is accepted until it has finished. The register
+// invalidation (inv_i) clears all three caches at any time; if it
+// arrives while a lookup is in progress, that lookup may already hold
+// table data read before the software change, so it fills nothing.
 //
-// A fault always terminates the transaction. The fault code and level
-// are reported alongside the response for the event queue to record.
+// Faults. A fault always terminates the transaction. Before the
+// response is given, the fault is written to the event queue
+// (sg_evtq), except:
+//
+//   * global abort and STE.Config = abort record nothing
+//   * F_TRANSLATION, F_ADDR_SIZE, F_ACCESS and F_PERMISSION are only
+//     recorded when the context descriptor has CD.R set
 
 module sg_xlate #(
   parameter int unsigned ADDR_W      = 48,
@@ -45,6 +53,25 @@ module sg_xlate #(
   input  logic              gbpa_abort_i,
   input  logic [47:6]       strtab_base_i,
   input  logic [5:0]        strtab_log2size_i,
+
+  // Command queue
+  input  logic              cmdqen_i,
+  input  logic              cmdq_pending_i,
+  input  logic              cmdq_err_active_i,
+  input  logic [47:5]       cmdq_base_i,
+  input  logic [3:0]        cmdq_rd_idx_i,
+  output logic              cmdq_cons_inc_o,
+  output logic              cmdq_err_o,
+  output logic [6:0]        cmdq_err_code_o,
+
+  // Event queue
+  input  logic              eventqen_i,
+  input  logic              evtq_full_i,
+  input  logic [47:5]       evtq_base_i,
+  input  logic [3:0]        evtq_wr_idx_i,
+  output logic              evtq_prod_inc_o,
+  output logic              evtq_ovf_o,
+  output logic              evtq_abt_o,
 
   // Cache control and counters
   input  logic              cache_dis_i,
@@ -71,7 +98,8 @@ module sg_xlate #(
   output logic [7:0]        rsp_fcode,
   output logic [1:0]        rsp_flevel,
 
-  // Table memory read port (AXI4 read channels)
+  // Memory port (AXI4): reads fetch tables and commands, writes store
+  // event records
   output logic              t_axi_arid,
   output logic [ADDR_W-1:0] t_axi_araddr,
   output logic [7:0]        t_axi_arlen,
@@ -85,7 +113,25 @@ module sg_xlate #(
   input  logic [1:0]        t_axi_rresp,
   input  logic              t_axi_rlast,
   input  logic              t_axi_rvalid,
-  output logic              t_axi_rready
+  output logic              t_axi_rready,
+
+  output logic              t_axi_awid,
+  output logic [ADDR_W-1:0] t_axi_awaddr,
+  output logic [7:0]        t_axi_awlen,
+  output logic [2:0]        t_axi_awsize,
+  output logic [1:0]        t_axi_awburst,
+  output logic [2:0]        t_axi_awprot,
+  output logic              t_axi_awvalid,
+  input  logic              t_axi_awready,
+  output logic [63:0]       t_axi_wdata,
+  output logic [7:0]        t_axi_wstrb,
+  output logic              t_axi_wlast,
+  output logic              t_axi_wvalid,
+  input  logic              t_axi_wready,
+  input  logic              t_axi_bid,
+  input  logic [1:0]        t_axi_bresp,
+  input  logic              t_axi_bvalid,
+  output logic              t_axi_bready
 );
 
   typedef enum logic [3:0] {
@@ -94,7 +140,9 @@ module sg_xlate #(
     X_STE_REQ, X_STE_WAIT, X_STE_DEC,
     X_CD_REQ,  X_CD_WAIT,  X_CD_DEC,
     X_WALK_START, X_WALK,
-    X_RSP
+    X_EVT_START, X_EVT_WAIT,
+    X_RSP,
+    X_CMD
   } state_e;
 
   // Configuration kinds held in the configuration cache
@@ -102,8 +150,8 @@ module sg_xlate #(
   localparam logic [1:0] K_BYPASS = 2'd1;
   localparam logic [1:0] K_S1     = 2'd2;
 
-  // Configuration cache data: {kind, asid, affd, t0sz, ttb[47:12]}
-  localparam int unsigned CFG_D_W = 2 + 8 + 1 + 6 + 36;
+  // Configuration cache data: {kind, asid, affd, rec, t0sz, ttb[47:12]}
+  localparam int unsigned CFG_D_W = 2 + 8 + 1 + 1 + 6 + 36;
 
   state_e            state_q;
 
@@ -120,6 +168,7 @@ module sg_xlate #(
   logic [1:0]        cur_kind_q;
   logic [7:0]        cur_asid_q;
   logic              cur_affd_q;
+  logic              cur_rec_q;          // CD.R: record stage 1 faults
   logic [5:0]        cur_t0sz_q;
   logic [47:12]      cur_ttb_q;
 
@@ -151,6 +200,76 @@ module sg_xlate #(
     .t_axi_arprot, .t_axi_arvalid, .t_axi_arready,
     .t_axi_rid, .t_axi_rdata, .t_axi_rresp, .t_axi_rlast, .t_axi_rvalid, .t_axi_rready
   );
+
+  // ---------------- command queue ----------------
+  logic              cmd_want, cmd_go, cmd_done;
+  logic              cmd_mem_req;
+  logic [ADDR_W-1:0] cmd_mem_addr;
+  logic              cmd_tlb_inv, cmd_wc_inv, cmd_cfg_inv;
+  logic              cmd_asid_en, cmd_va_en;
+  logic [7:0]        cmd_asid;
+  logic [47:12]      cmd_va;
+  logic [SID_W-1:0]  cmd_cfg_sid, cmd_cfg_mask;
+
+  sg_cmdq #(.ADDR_W(ADDR_W), .SID_W(SID_W)) u_cmdq (
+    .clk, .rst_n,
+    .cmdqen_i       (cmdqen_i),
+    .pending_i      (cmdq_pending_i),
+    .err_active_i   (cmdq_err_active_i),
+    .base_i         (cmdq_base_i),
+    .rd_idx_i       (cmdq_rd_idx_i),
+    .want_o         (cmd_want),
+    .go_i           (cmd_go),
+    .done_o         (cmd_done),
+    .mem_req_o      (cmd_mem_req),
+    .mem_addr_o     (cmd_mem_addr),
+    .mem_done_i     (mem_done),
+    .mem_data0_i    (mem_data0),
+    .mem_data1_i    (mem_data1),
+    .mem_err_i      (mem_err),
+    .cons_inc_o     (cmdq_cons_inc_o),
+    .err_o          (cmdq_err_o),
+    .err_code_o     (cmdq_err_code_o),
+    .tlb_inv_o      (cmd_tlb_inv),
+    .wc_inv_o       (cmd_wc_inv),
+    .inv_asid_en_o  (cmd_asid_en),
+    .inv_va_en_o    (cmd_va_en),
+    .inv_asid_o     (cmd_asid),
+    .inv_va_o       (cmd_va),
+    .cfg_inv_o      (cmd_cfg_inv),
+    .cfg_inv_sid_o  (cmd_cfg_sid),
+    .cfg_inv_mask_o (cmd_cfg_mask)
+  );
+
+  // A waiting command goes before the next request
+  assign cmd_go = (state_q == X_IDLE) & cmd_want;
+
+  // ---------------- event queue ----------------
+  logic evt_start, evt_done;
+
+  sg_evtq #(.ADDR_W(ADDR_W), .SID_W(SID_W)) u_evtq (
+    .clk, .rst_n,
+    .start_i    (evt_start),
+    .code_i     (rsp_fcode),
+    .sid_i      (sid_q),
+    .addr_i     (addr_q),
+    .write_i    (write_q),
+    .prot_i     (prot_q),
+    .done_o     (evt_done),
+    .eventqen_i (eventqen_i),
+    .full_i     (evtq_full_i),
+    .base_i     (evtq_base_i),
+    .wr_idx_i   (evtq_wr_idx_i),
+    .prod_inc_o (evtq_prod_inc_o),
+    .ovf_o      (evtq_ovf_o),
+    .abt_o      (evtq_abt_o),
+    .t_axi_awid, .t_axi_awaddr, .t_axi_awlen, .t_axi_awsize, .t_axi_awburst,
+    .t_axi_awprot, .t_axi_awvalid, .t_axi_awready,
+    .t_axi_wdata, .t_axi_wstrb, .t_axi_wlast, .t_axi_wvalid, .t_axi_wready,
+    .t_axi_bid, .t_axi_bresp, .t_axi_bvalid, .t_axi_bready
+  );
+
+  assign evt_start = (state_q == X_EVT_START);
 
   // ---------------- page table walker ----------------
   logic              ptw_start, ptw_done;
@@ -230,6 +349,9 @@ module sg_xlate #(
   sg_tagcache #(.ENTRIES(CFG_ENTRIES), .TAG_W(SID_W), .DATA_W(CFG_D_W)) u_cfgc (
     .clk, .rst_n,
     .inv_all   (inv_i),
+    .inv_sel   (cmd_cfg_inv),
+    .inv_tag   (cmd_cfg_sid),
+    .inv_mask  (cmd_cfg_mask),
     .lk_tag    (sid_q),
     .hit       (cfgc_hit_raw),
     .hit_data  (cfgc_data),
@@ -246,10 +368,11 @@ module sg_xlate #(
     if (state_q == X_STE_DEC && !ste_bad && ste_cfg != sg_pkg::STE_CFG_S1) begin
       cfgc_fill      = fill_ok;
       cfgc_fill_data = {(ste_cfg == sg_pkg::STE_CFG_ABORT) ? K_ABORT : K_BYPASS,
-                        8'b0, 1'b0, 6'b0, 36'b0};
+                        8'b0, 1'b0, 1'b0, 6'b0, 36'b0};
     end else if (state_q == X_CD_DEC && !cd_bad && !cd0_q[sg_pkg::CD_EPD0]) begin
       cfgc_fill      = fill_ok;
-      cfgc_fill_data = {K_S1, cd_asid, cd0_q[sg_pkg::CD_AFFD], cd_t0sz, cd1_q[47:12]};
+      cfgc_fill_data = {K_S1, cd_asid, cd0_q[sg_pkg::CD_AFFD], cd0_q[sg_pkg::CD_R],
+                        cd_t0sz, cd1_q[47:12]};
     end
   end
 
@@ -259,12 +382,13 @@ module sg_xlate #(
   logic [1:0]   eff_kind;
   logic [7:0]   eff_asid;
   logic         eff_affd;
+  logic         eff_rec;
   logic [5:0]   eff_t0sz;
   logic [47:12] eff_ttb;
 
   assign eff_valid = cfg_have_q | cfgc_hit;
-  assign {eff_kind, eff_asid, eff_affd, eff_t0sz, eff_ttb} =
-           cfg_have_q ? {cur_kind_q, cur_asid_q, cur_affd_q, cur_t0sz_q, cur_ttb_q}
+  assign {eff_kind, eff_asid, eff_affd, eff_rec, eff_t0sz, eff_ttb} =
+           cfg_have_q ? {cur_kind_q, cur_asid_q, cur_affd_q, cur_rec_q, cur_t0sz_q, cur_ttb_q}
                       : cfgc_data;
 
   // ---------------- TLB ----------------
@@ -276,6 +400,11 @@ module sg_xlate #(
   sg_tlb #(.ENTRIES(TLB_ENTRIES), .ASID_W(8)) u_tlb (
     .clk, .rst_n,
     .inv_all    (inv_i),
+    .inv_sel    (cmd_tlb_inv),
+    .inv_asid_en(cmd_asid_en),
+    .inv_asid   (cmd_asid),
+    .inv_va_en  (cmd_va_en),
+    .inv_va     (cmd_va),
     .lk_asid    (eff_asid),
     .lk_va      (addr_q[47:0]),
     .hit        (tlb_hit_raw),
@@ -320,6 +449,9 @@ module sg_xlate #(
   sg_tagcache #(.ENTRIES(WC_ENTRIES), .TAG_W(8 + 27), .DATA_W(36)) u_wc (
     .clk, .rst_n,
     .inv_all   (inv_i),
+    .inv_sel   (cmd_wc_inv),
+    .inv_tag   ({cmd_asid, cmd_va[47:21]}),
+    .inv_mask  ({{8{cmd_asid_en}}, {27{cmd_va_en}}}),
     .lk_tag    ({eff_asid, addr_q[47:21]}),
     .hit       (wc_hit_raw),
     .hit_data  (wc_data),
@@ -351,6 +483,11 @@ module sg_xlate #(
         mem_addr = cd_addr;
         mem_two  = 1'b1;
       end
+      X_CMD: begin
+        mem_req  = cmd_mem_req;
+        mem_addr = cmd_mem_addr;
+        mem_two  = 1'b1;                  // a command is two words
+      end
       default: begin
         mem_req  = ptw_mem_req;
         mem_addr = ptw_mem_addr;
@@ -360,17 +497,19 @@ module sg_xlate #(
   end
 
   // ---------------- control ----------------
-  assign req_ready = (state_q == X_IDLE);
+  assign req_ready = (state_q == X_IDLE) & ~cmd_want;
   assign rsp_valid = (state_q == X_RSP);
 
-  // Finish with a fault / with success
+  // Finish the lookup. A fault with `rec` set is written to the event
+  // queue before the response is given.
   task automatic finish(input logic fault, input logic [7:0] code,
-                        input logic [1:0] level, input logic [ADDR_W-1:0] oaddr);
+                        input logic [1:0] level, input logic [ADDR_W-1:0] oaddr,
+                        input logic rec);
     rsp_fault  <= fault;
     rsp_fcode  <= code;
     rsp_flevel <= level;
     rsp_addr   <= oaddr;
-    state_q    <= X_RSP;
+    state_q    <= (fault && rec && eventqen_i) ? X_EVT_START : X_RSP;
   endtask
 
   always_ff @(posedge clk or negedge rst_n) begin
@@ -387,6 +526,7 @@ module sg_xlate #(
       cur_kind_q <= K_ABORT;
       cur_asid_q <= '0;
       cur_affd_q <= 1'b0;
+      cur_rec_q  <= 1'b0;
       cur_t0sz_q <= '0;
       cur_ttb_q  <= '0;
       wc_hit_q   <= 1'b0;
@@ -398,7 +538,9 @@ module sg_xlate #(
     end else begin
       case (state_q)
         X_IDLE: begin
-          if (req_valid) begin
+          if (cmd_want) begin
+            state_q <= X_CMD;
+          end else if (req_valid) begin
             addr_q     <= req_addr;
             sid_q      <= req_sid;
             write_q    <= req_write;
@@ -406,7 +548,7 @@ module sg_xlate #(
             cfg_have_q <= 1'b0;
             if (!smmuen_i) begin
               // global bypass or abort, no event
-              finish(gbpa_abort_i, sg_pkg::FC_NONE, 2'd0, req_addr);
+              finish(gbpa_abort_i, sg_pkg::FC_NONE, 2'd0, req_addr, 1'b0);
             end else begin
               state_q <= X_LOOKUP;
             end
@@ -421,17 +563,18 @@ module sg_xlate #(
             cur_kind_q <= eff_kind;
             cur_asid_q <= eff_asid;
             cur_affd_q <= eff_affd;
+            cur_rec_q  <= eff_rec;
             cur_t0sz_q <= eff_t0sz;
             cur_ttb_q  <= eff_ttb;
             case (eff_kind)
-              K_ABORT:  finish(1'b1, sg_pkg::FC_NONE, 2'd0, addr_q);
-              K_BYPASS: finish(1'b0, sg_pkg::FC_NONE, 2'd0, addr_q);
+              K_ABORT:  finish(1'b1, sg_pkg::FC_NONE, 2'd0, addr_q, 1'b0);
+              K_BYPASS: finish(1'b0, sg_pkg::FC_NONE, 2'd0, addr_q, 1'b0);
               default: begin
                 if (tlb_hit) begin
                   if (tlb_denied)
-                    finish(1'b1, sg_pkg::FC_PERMISSION, tlb_level, addr_q);
+                    finish(1'b1, sg_pkg::FC_PERMISSION, tlb_level, addr_q, eff_rec);
                   else
-                    finish(1'b0, sg_pkg::FC_NONE, tlb_level, tlb_pa);
+                    finish(1'b0, sg_pkg::FC_NONE, tlb_level, tlb_pa, 1'b0);
                 end else begin
                   wc_hit_q   <= wc_hit;
                   wc_table_q <= wc_data;
@@ -443,7 +586,7 @@ module sg_xlate #(
         end
 
         X_STE_REQ: begin
-          if (sid_out_of_range) finish(1'b1, sg_pkg::FC_BAD_STREAMID, 2'd0, addr_q);
+          if (sid_out_of_range) finish(1'b1, sg_pkg::FC_BAD_STREAMID, 2'd0, addr_q, 1'b1);
           else                  state_q <= X_STE_WAIT;
         end
 
@@ -451,17 +594,17 @@ module sg_xlate #(
           if (mem_done) begin
             ste_q   <= mem_data0;
             state_q <= X_STE_DEC;
-            if (mem_err) finish(1'b1, sg_pkg::FC_STE_FETCH, 2'd0, addr_q);
+            if (mem_err) finish(1'b1, sg_pkg::FC_STE_FETCH, 2'd0, addr_q, 1'b1);
           end
         end
 
         X_STE_DEC: begin
           if (ste_bad)
-            finish(1'b1, sg_pkg::FC_BAD_STE, 2'd0, addr_q);
+            finish(1'b1, sg_pkg::FC_BAD_STE, 2'd0, addr_q, 1'b1);
           else if (ste_cfg == sg_pkg::STE_CFG_ABORT)
-            finish(1'b1, sg_pkg::FC_NONE, 2'd0, addr_q);
+            finish(1'b1, sg_pkg::FC_NONE, 2'd0, addr_q, 1'b0);
           else if (ste_cfg == sg_pkg::STE_CFG_BYPASS)
-            finish(1'b0, sg_pkg::FC_NONE, 2'd0, addr_q);
+            finish(1'b0, sg_pkg::FC_NONE, 2'd0, addr_q, 1'b0);
           else
             state_q <= X_CD_REQ;
         end
@@ -473,22 +616,23 @@ module sg_xlate #(
             cd0_q   <= mem_data0;
             cd1_q   <= mem_data1;
             state_q <= X_CD_DEC;
-            if (mem_err) finish(1'b1, sg_pkg::FC_CD_FETCH, 2'd0, addr_q);
+            if (mem_err) finish(1'b1, sg_pkg::FC_CD_FETCH, 2'd0, addr_q, 1'b1);
           end
         end
 
         X_CD_DEC: begin
           if (cd_bad) begin
-            finish(1'b1, sg_pkg::FC_BAD_CD, 2'd0, addr_q);
+            finish(1'b1, sg_pkg::FC_BAD_CD, 2'd0, addr_q, 1'b1);
           end else if (cd0_q[sg_pkg::CD_EPD0]) begin
             // walks through TTB0 are disabled for this context
-            finish(1'b1, sg_pkg::FC_TRANSLATION, 2'd0, addr_q);
+            finish(1'b1, sg_pkg::FC_TRANSLATION, 2'd0, addr_q, cd0_q[sg_pkg::CD_R]);
           end else begin
             // configuration known: go back and try the TLB with it
             cfg_have_q <= 1'b1;
             cur_kind_q <= K_S1;
             cur_asid_q <= cd_asid;
             cur_affd_q <= cd0_q[sg_pkg::CD_AFFD];
+            cur_rec_q  <= cd0_q[sg_pkg::CD_R];
             cur_t0sz_q <= cd_t0sz;
             cur_ttb_q  <= cd1_q[47:12];
             state_q    <= X_LOOKUP;
@@ -500,10 +644,17 @@ module sg_xlate #(
         X_WALK: begin
           if (ptw_done)
             finish(ptw_fcode != sg_pkg::FC_NONE, ptw_fcode, ptw_flevel,
-                   (ptw_fcode != sg_pkg::FC_NONE) ? addr_q : ptw_pa);
+                   (ptw_fcode != sg_pkg::FC_NONE) ? addr_q : ptw_pa,
+                   (ptw_fcode == sg_pkg::FC_WALK_EABT) | cur_rec_q);
         end
 
+        X_EVT_START: state_q <= X_EVT_WAIT;
+
+        X_EVT_WAIT: if (evt_done) state_q <= X_RSP;
+
         X_RSP: state_q <= X_IDLE;
+
+        X_CMD: if (cmd_done) state_q <= X_IDLE;
 
         default: state_q <= X_IDLE;
       endcase
@@ -514,9 +665,9 @@ module sg_xlate #(
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       inv_pend_q <= 1'b0;
-    end else if (state_q == X_RSP) begin
-      inv_pend_q <= 1'b0;
-    end else if (inv_i && state_q != X_IDLE) begin
+    end else if (state_q == X_IDLE || state_q == X_CMD || state_q == X_RSP) begin
+      inv_pend_q <= 1'b0;                // no lookup in progress
+    end else if (inv_i) begin
       inv_pend_q <= 1'b1;
     end
   end

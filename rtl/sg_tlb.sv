@@ -12,7 +12,13 @@
 //
 // Lookup is combinational. A fill writes, in order of preference, an
 // entry that already holds the same translation, the first empty
-// entry, or the round robin victim. inv_all clears every entry and
+// entry, or the round robin victim.
+//
+// Invalidation. inv_all clears every entry. inv_sel clears the entries
+// selected by the command: those with inv_asid if inv_asid_en is set,
+// and those covering inv_va if inv_va_en is set (with neither set,
+// all of them). "Covering" uses the entry's own level, so one address
+// inside a 2 MB or 1 GB block removes the block entry. Invalidation
 // wins over a fill in the same cycle.
 //
 // Software must give different address spaces different ASIDs: two
@@ -26,6 +32,11 @@ module sg_tlb #(
   input  logic              rst_n,
 
   input  logic              inv_all,
+  input  logic              inv_sel,
+  input  logic              inv_asid_en,
+  input  logic [ASID_W-1:0] inv_asid,
+  input  logic              inv_va_en,
+  input  logic [47:12]      inv_va,
 
   // Lookup
   input  logic [ASID_W-1:0] lk_asid,
@@ -128,6 +139,16 @@ module sg_tlb #(
     victim       = found_dup ? dup_idx : found_free ? free_idx : rr_q;
   end
 
+  // ---------------- selective invalidation ----------------
+  logic [ENTRIES-1:0] inv_vec;
+
+  always_comb begin
+    for (int i = 0; i < ENTRIES; i++) begin
+      inv_vec[i] = (!inv_asid_en || asid_q[i] == inv_asid) &&
+                   (!inv_va_en   || ((vtag_q[i] ^ inv_va) & tag_mask(lvl_q[i])) == 36'b0);
+    end
+  end
+
   // ---------------- state ----------------
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
@@ -140,6 +161,8 @@ module sg_tlb #(
       rr_q   <= '0;
     end else if (inv_all) begin
       v_q <= '0;
+    end else if (inv_sel) begin
+      v_q <= v_q & ~inv_vec;
     end else if (fill) begin
       v_q[victim]    <= 1'b1;
       asid_q[victim] <= fill_asid;

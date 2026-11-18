@@ -5,9 +5,11 @@
 //
 //   s_axi_*  AXI4 from the device whose accesses are being policed
 //   m_axi_*  AXI4 towards the memory system
-//   t_axi_*  AXI4 read channels used to fetch stream table entries,
-//            context descriptors and translation tables
+//   t_axi_*  AXI4 port of the unit itself: reads fetch stream table
+//            entries, context descriptors, translation tables and
+//            commands; writes store event records
 //   s_apb_*  APB4 programming interface
+//   irq_*    interrupt pulses: event queue not empty, global error
 //
 // See docs/architecture.md for the block diagram and milestone plan.
 
@@ -112,7 +114,7 @@ module streamguard #(
   output logic                m_axi_rready,
 
 
-  // ---------------- table memory read port ----------------
+  // ---------------- memory port of the unit ----------------
   output logic                t_axi_arid,
   output logic [ADDR_W-1:0]   t_axi_araddr,
   output logic [7:0]          t_axi_arlen,
@@ -127,6 +129,27 @@ module streamguard #(
   input  logic                t_axi_rlast,
   input  logic                t_axi_rvalid,
   output logic                t_axi_rready,
+  output logic                t_axi_awid,
+  output logic [ADDR_W-1:0]   t_axi_awaddr,
+  output logic [7:0]          t_axi_awlen,
+  output logic [2:0]          t_axi_awsize,
+  output logic [1:0]          t_axi_awburst,
+  output logic [2:0]          t_axi_awprot,
+  output logic                t_axi_awvalid,
+  input  logic                t_axi_awready,
+  output logic [63:0]         t_axi_wdata,
+  output logic [7:0]          t_axi_wstrb,
+  output logic                t_axi_wlast,
+  output logic                t_axi_wvalid,
+  input  logic                t_axi_wready,
+  input  logic                t_axi_bid,
+  input  logic [1:0]          t_axi_bresp,
+  input  logic                t_axi_bvalid,
+  output logic                t_axi_bready,
+
+  // ---------------- interrupts (one cycle pulses) ----------------
+  output logic                irq_eventq,
+  output logic                irq_gerror,
 
   // ---------------- APB4 programming interface ----------------
   input  logic [16:0]         s_apb_paddr,
@@ -144,6 +167,12 @@ module streamguard #(
 
   logic [47:6]       strtab_base;
   logic [5:0]        strtab_log2size;
+
+  logic [47:5]       cmdq_base, evtq_base;
+  logic [3:0]        cmdq_rd_idx, evtq_wr_idx;
+  logic              cmdq_pending, cmdq_err_active, cmdq_cons_inc, cmdq_err;
+  logic [6:0]        cmdq_err_code;
+  logic              evtq_full, evtq_prod_inc, evtq_ovf, evtq_abt;
 
   logic              cache_dis, inv_all, cnt_clr;
   logic [31:0]       cnt_tlb_hit, cnt_tlb_miss, cnt_wc_hit, cnt_cfg_hit, cnt_cfg_miss;
@@ -174,6 +203,21 @@ module streamguard #(
     .gbpa_abort_o (gbpa_abort),
     .strtab_base_o     (strtab_base),
     .strtab_log2size_o (strtab_log2size),
+    .cmdq_base_o       (cmdq_base),
+    .cmdq_pending_o    (cmdq_pending),
+    .cmdq_rd_idx_o     (cmdq_rd_idx),
+    .cmdq_err_active_o (cmdq_err_active),
+    .cmdq_cons_inc_i   (cmdq_cons_inc),
+    .cmdq_err_i        (cmdq_err),
+    .cmdq_err_code_i   (cmdq_err_code),
+    .evtq_base_o       (evtq_base),
+    .evtq_full_o       (evtq_full),
+    .evtq_wr_idx_o     (evtq_wr_idx),
+    .evtq_prod_inc_i   (evtq_prod_inc),
+    .evtq_ovf_i        (evtq_ovf),
+    .evtq_abt_i        (evtq_abt),
+    .irq_eventq_o      (irq_eventq),
+    .irq_gerror_o      (irq_gerror),
     .cache_dis_o       (cache_dis),
     .inv_all_o         (inv_all),
     .cnt_clr_o         (cnt_clr),
@@ -278,6 +322,21 @@ module streamguard #(
     .gbpa_abort_i (gbpa_abort),
     .strtab_base_i     (strtab_base),
     .strtab_log2size_i (strtab_log2size),
+    .cmdqen_i          (cmdqen),
+    .cmdq_pending_i    (cmdq_pending),
+    .cmdq_err_active_i (cmdq_err_active),
+    .cmdq_base_i       (cmdq_base),
+    .cmdq_rd_idx_i     (cmdq_rd_idx),
+    .cmdq_cons_inc_o   (cmdq_cons_inc),
+    .cmdq_err_o        (cmdq_err),
+    .cmdq_err_code_o   (cmdq_err_code),
+    .eventqen_i        (eventqen),
+    .evtq_full_i       (evtq_full),
+    .evtq_base_i       (evtq_base),
+    .evtq_wr_idx_i     (evtq_wr_idx),
+    .evtq_prod_inc_o   (evtq_prod_inc),
+    .evtq_ovf_o        (evtq_ovf),
+    .evtq_abt_o        (evtq_abt),
     .cache_dis_i       (cache_dis),
     .inv_i             (inv_all),
     .cnt_clr_i         (cnt_clr),
@@ -299,11 +358,15 @@ module streamguard #(
     .rsp_flevel   (x_rsp_flevel),
     .t_axi_arid, .t_axi_araddr, .t_axi_arlen, .t_axi_arsize, .t_axi_arburst,
     .t_axi_arprot, .t_axi_arvalid, .t_axi_arready,
-    .t_axi_rid, .t_axi_rdata, .t_axi_rresp, .t_axi_rlast, .t_axi_rvalid, .t_axi_rready
+    .t_axi_rid, .t_axi_rdata, .t_axi_rresp, .t_axi_rlast, .t_axi_rvalid, .t_axi_rready,
+    .t_axi_awid, .t_axi_awaddr, .t_axi_awlen, .t_axi_awsize, .t_axi_awburst,
+    .t_axi_awprot, .t_axi_awvalid, .t_axi_awready,
+    .t_axi_wdata, .t_axi_wstrb, .t_axi_wlast, .t_axi_wvalid, .t_axi_wready,
+    .t_axi_bid, .t_axi_bresp, .t_axi_bvalid, .t_axi_bready
   );
 
-  // Queue enables and the fault report are used when the queues arrive.
+  // The fault code and level are visible to the testbench only.
   logic unused;
-  assign unused = &{1'b0, cmdqen, eventqen, x_rsp_fcode, x_rsp_flevel};
+  assign unused = &{1'b0, x_rsp_fcode, x_rsp_flevel};
 
 endmodule

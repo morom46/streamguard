@@ -8,6 +8,11 @@ It follows the same lookup order as the specification:
 
 It only reads memory through the `rd64` callable it is given, so the
 same function works against the testbench memory or a dictionary.
+
+The result also says whether the fault is recorded in the event queue:
+configuration errors always are, a deliberate abort never is, and the
+translation-related faults only when the context descriptor has CD.R
+set.
 """
 
 from dataclasses import dataclass
@@ -24,6 +29,9 @@ FC_TRANSLATION = 0x10
 FC_ADDR_SIZE = 0x11
 FC_ACCESS = 0x12
 FC_PERMISSION = 0x13
+
+# Faults whose event record carries the input address and access type
+XLAT_FAULTS = (FC_TRANSLATION, FC_ADDR_SIZE, FC_ACCESS, FC_PERMISSION, FC_WALK_EABT)
 
 FC_NAMES = {
     FC_NONE: "none", FC_BAD_STREAMID: "C_BAD_STREAMID", FC_BAD_STE: "C_BAD_STE",
@@ -45,6 +53,7 @@ class Result:
     fcode: int = FC_NONE   # FC_NONE with fault=True: terminated, no event
     level: int = 0         # level of the fault, or of the leaf on success
     reads: int = 0         # table memory read requests the lookup needs
+    event: bool = False    # the fault is recorded in the event queue
 
     def __str__(self):
         if not self.fault:
@@ -131,14 +140,14 @@ def translate(rd64, strtab_base, log2size, sid, va, write, prot,
         return Result(fault=gbpa_abort, addr=va)
 
     if sid >> log2size:
-        return Result(True, fcode=FC_BAD_STREAMID)
+        return Result(True, fcode=FC_BAD_STREAMID, event=True)
 
     ste = rd64((strtab_base & ~0x3F) + sid * 64)
     cfg = bits(ste, 3, 1)
     if not ste & 1 or cfg not in (STE_CFG_ABORT, STE_CFG_BYPASS, STE_CFG_S1):
-        return Result(True, fcode=FC_BAD_STE, reads=1)
+        return Result(True, fcode=FC_BAD_STE, reads=1, event=True)
     if cfg == STE_CFG_S1 and bits(ste, 5, 4) != 0:
-        return Result(True, fcode=FC_BAD_STE, reads=1)
+        return Result(True, fcode=FC_BAD_STE, reads=1, event=True)
     if cfg == STE_CFG_ABORT:
         return Result(True, reads=1)
     if cfg == STE_CFG_BYPASS:
@@ -153,12 +162,13 @@ def translate(rd64, strtab_base, log2size, sid, va, write, prot,
     endi = (cd0 >> 15) & 1
     tg0 = bits(cd0, 7, 6)
     if not valid or not aa64 or endi or tg0 != 0 or not 16 <= t0sz <= 39:
-        return Result(True, fcode=FC_BAD_CD, reads=2)
+        return Result(True, fcode=FC_BAD_CD, reads=2, event=True)
+    record = bool((cd0 >> 45) & 1)                    # CD.R
     if (cd0 >> 14) & 1:                               # EPD0
-        return Result(True, fcode=FC_TRANSLATION, reads=2)
+        return Result(True, fcode=FC_TRANSLATION, reads=2, event=record)
 
     affd = (cd0 >> 35) & 1
     fcode, level, pa, reads = walk(rd64, cd1, t0sz, affd, va, write, prot)
     if fcode != FC_NONE:
-        return Result(True, fcode=fcode, level=level, reads=2 + reads)
+        return Result(True, fcode=fcode, level=level, reads=2 + reads, event=record)
     return Result(False, addr=pa, level=level, reads=2 + reads)

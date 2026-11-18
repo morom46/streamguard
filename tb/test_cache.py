@@ -20,7 +20,8 @@ from cocotb.triggers import ClockCycles, RisingEdge, with_timeout
 from cocotbext.axi import AxiProt, AxiResp
 
 import sg_model as model
-from sg_bench import DATA_HI, PRIV, TIMEOUT_NS, UNPRIV, Bench
+from sg_bench import (DATA_HI, PRIV, TIMEOUT_NS, UNPRIV, Bench,
+                      HoldTableReads)
 from sg_pgtable import BLOCK_1G, BLOCK_2M, PAGE, leaf_desc, table_desc
 
 TLB_ENTRIES = 8          # must match the streamguard defaults
@@ -256,20 +257,6 @@ async def stale_until_invalidated(dut):
     await b.expect(model.FC_TRANSLATION, 3, sid=1, va=0x9000)
 
 
-class HoldTableReads:
-    """Pause generator for the table read port: once `after` reads have
-    been accepted, stop accepting more while active."""
-
-    def __init__(self, env, after):
-        self.env, self.after, self.active = env, after, True
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        return self.active and self.env.table_reads >= self.after
-
-
 @cocotb.test()
 async def invalidate_during_walk(dut):
     """The walk has read the old level 2 entry when software repoints it
@@ -290,7 +277,7 @@ async def invalidate_during_walk(dut):
 
     # STE, CD, L0, L1, L2 go through; the level 3 read is held
     hold = HoldTableReads(env, after=5)
-    env.tram.ar_channel.set_pause_generator(hold)
+    env.tram.read_if.ar_channel.set_pause_generator(hold)
     task = cocotb.start_soon(env.axi.read(va, 8, user=1))
     while env.table_reads < 5:
         await RisingEdge(dut.clk)

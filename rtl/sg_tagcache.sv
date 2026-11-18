@@ -122,4 +122,63 @@ module sg_tagcache #(
     else $error("tag cache: tag matches more than one entry");
 `endif
 
+`ifdef FORMAL
+  // Proved for every sequence of fills, invalidations and lookups
+  // (make formal). The proof watches one arbitrary tag, f_tag, and
+  // keeps its own record of what the cache may hold for it.
+  (* anyconst *) logic [TAG_W-1:0] f_tag;
+  logic              f_have;        // an entry for f_tag may be present
+  logic [DATA_W-1:0] f_data;        // ... and this is its data
+  logic              f_past_valid;
+
+  initial f_past_valid = 1'b0;
+  always @(posedge clk) f_past_valid <= 1'b1;
+  initial assume (!rst_n);
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      f_have <= 1'b0;
+      f_data <= '0;
+    end else if (inv_all) begin
+      f_have <= 1'b0;
+    end else if (inv_sel) begin
+      if (((f_tag ^ inv_tag) & inv_mask) == '0) f_have <= 1'b0;
+    end else if (fill && fill_tag == f_tag) begin
+      f_have <= 1'b1;
+      f_data <= fill_data;
+    end
+  end
+
+  always @(posedge clk) begin
+    if (rst_n) begin
+      // 1. An entry for the watched tag exists only if it was filled
+      //    and not invalidated since, and it holds the last data filled.
+      for (int i = 0; i < ENTRIES; i++) begin
+        if (v_q[i] && tag_q[i] == f_tag) begin
+          assert (f_have);
+          assert (data_q[i] == f_data);
+        end
+      end
+      // 2. No tag is stored twice.
+      for (int i = 0; i < ENTRIES; i++) begin
+        for (int j = i + 1; j < ENTRIES; j++) begin
+          assert (!(v_q[i] && v_q[j] && tag_q[i] == tag_q[j]));
+        end
+      end
+      // What the user of the cache sees:
+      assert ($onehot0(hit_vec));
+      if (lk_tag == f_tag && hit) begin
+        assert (f_have);                    // never a hit after invalidation
+        assert (hit_data == f_data);        // never stale or foreign data
+      end
+    end
+    // 3. A fill is visible to the next lookup.
+    if (f_past_valid && rst_n && $past(rst_n) &&
+        $past(fill && !inv_all && !inv_sel) && lk_tag == $past(fill_tag)) begin
+      assert (hit);
+      assert (hit_data == $past(fill_data));
+    end
+  end
+`endif
+
 endmodule

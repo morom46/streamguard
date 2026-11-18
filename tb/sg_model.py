@@ -54,6 +54,8 @@ class Result:
     level: int = 0         # level of the fault, or of the leaf on success
     reads: int = 0         # table memory read requests the lookup needs
     event: bool = False    # the fault is recorded in the event queue
+    kind: str = "config"   # how far the lookup got: global (SMMUEN = 0),
+                           # config (configuration error), abort, bypass, stage1
 
     def __str__(self):
         if not self.fault:
@@ -137,7 +139,7 @@ def walk(rd64, ttb, t0sz, affd, va, write, prot):
 def translate(rd64, strtab_base, log2size, sid, va, write, prot,
               smmuen=True, gbpa_abort=False):
     if not smmuen:
-        return Result(fault=gbpa_abort, addr=va)
+        return Result(fault=gbpa_abort, addr=va, kind="global")
 
     if sid >> log2size:
         return Result(True, fcode=FC_BAD_STREAMID, event=True)
@@ -149,9 +151,9 @@ def translate(rd64, strtab_base, log2size, sid, va, write, prot,
     if cfg == STE_CFG_S1 and bits(ste, 5, 4) != 0:
         return Result(True, fcode=FC_BAD_STE, reads=1, event=True)
     if cfg == STE_CFG_ABORT:
-        return Result(True, reads=1)
+        return Result(True, reads=1, kind="abort")
     if cfg == STE_CFG_BYPASS:
-        return Result(False, addr=va, reads=1)
+        return Result(False, addr=va, reads=1, kind="bypass")
 
     cd_addr = bits(ste, 47, 6) << 6
     cd0 = rd64(cd_addr)
@@ -165,10 +167,11 @@ def translate(rd64, strtab_base, log2size, sid, va, write, prot,
         return Result(True, fcode=FC_BAD_CD, reads=2, event=True)
     record = bool((cd0 >> 45) & 1)                    # CD.R
     if (cd0 >> 14) & 1:                               # EPD0
-        return Result(True, fcode=FC_TRANSLATION, reads=2, event=record)
+        return Result(True, fcode=FC_TRANSLATION, reads=2, event=record, kind="stage1")
 
     affd = (cd0 >> 35) & 1
     fcode, level, pa, reads = walk(rd64, cd1, t0sz, affd, va, write, prot)
     if fcode != FC_NONE:
-        return Result(True, fcode=fcode, level=level, reads=2 + reads, event=record)
-    return Result(False, addr=pa, level=level, reads=2 + reads)
+        return Result(True, fcode=fcode, level=level, reads=2 + reads, event=record,
+                      kind="stage1")
+    return Result(False, addr=pa, level=level, reads=2 + reads, kind="stage1")

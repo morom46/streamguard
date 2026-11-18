@@ -9,6 +9,7 @@ from cocotbext.axi import AxiProt, AxiResp
 
 import sg_model as model
 import sg_queues as q
+from sg_coverage import Probe, cov
 from sg_env import (CMDQ_CONS, CMDQ_PROD, CR0_CMDQEN, CR0_EVENTQEN, CR0_SMMUEN,
                     EVENTQ_CONS, EVENTQ_PROD, IRQ_CTRL, IRQ_EVENTQ_EN,
                     IRQ_GERROR_EN, Env)
@@ -130,8 +131,10 @@ class Bench:
 
     async def _probe(self):
         x = self.dut.u_xlate
+        coverage = Probe(self.dut)
         while True:
             await RisingEdge(self.dut.clk)
+            coverage.sample()
             if int(x.rsp_valid.value):
                 self.rsp.append((bool(int(x.rsp_fault.value)),
                                  int(x.rsp_fcode.value), int(x.rsp_flevel.value)))
@@ -196,6 +199,8 @@ class Bench:
                 assert self.mem.read(exp.addr, length) == data, what
             else:
                 assert resp.data == data, what
+
+        cov.sample_access(exp, write, prot, va, length)
 
         if self.check_events:
             want = self.expected_event(exp, sid, va, write, prot)

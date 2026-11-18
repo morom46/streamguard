@@ -34,4 +34,24 @@ module sg_perm (
     end
   end
 
+`ifdef FORMAL
+  // The complete rule, written as a table of cases and proved for
+  // every input combination. Run with: make formal
+  always_comb begin
+    if (is_write) begin
+      // a write never looks at the execute-never bits or at "instruction"
+      if (privileged) assert (denied == ap2);
+      else            assert (denied == (ap2 | ~ap1));
+    end else if (!instruction) begin
+      // data read
+      if (privileged) assert (!denied);
+      else            assert (denied == ~ap1);
+    end else begin
+      // instruction read
+      if (privileged) assert (denied == pxn);
+      else            assert (denied == (uxn | ~ap1));
+    end
+  end
+`endif
+
 endmodule

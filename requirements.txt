@@ -1,6 +1,7 @@
-# Simulation and synthesis tools, all from PyPI so the same versions
+# Simulation, synthesis and formal tools, all from PyPI so the same versions
 # run on Linux, WSL and CI.
 cocotb==2.1.0
 cocotbext-axi==0.1.28
 verilator==5.48.0
 yowasp-yosys==0.71.0.0.post1285
+z3-solver==5.4.1.0

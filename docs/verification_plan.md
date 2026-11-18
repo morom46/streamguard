@@ -21,8 +21,10 @@ unit, the number of table reads, the downstream address and the data.
 `tb/sg_pgtable.py` builds stream table entries, context descriptors and
 translation tables, including deliberately faulty entries.
 
-Later milestones add functional coverage and formal proofs of the handshake
-and isolation properties.
+Two more things sit on top of the tests, both described in section 6:
+functional coverage measures what the tests actually exercised, and formal
+proofs show a few key properties for every possible input, not only the
+simulated ones.
 
 ## 2. Milestone 1 features and tests
 
@@ -147,7 +149,91 @@ Directed tests, in test_queues.py unless noted:
 | Queue registers, pointer write protection | `queue_registers` (test_regs.py) |
 | IRQ_CTRL, GERROR, GERRORN | `irq_and_error_registers` (test_regs.py) |
 
-## 6. Assertions
+## 6. Milestone 5: functional coverage and formal proofs
+
+### 6.1 Functional coverage
+
+`tb/sg_coverage.py` defines 16 cover points with 104 bins. Each bin is one
+situation that should be seen at least once. Samples come from two places:
+
+- the reference model, once per bench access (what should happen)
+- a probe on signals inside the design, every clock (what the hardware did)
+
+| Cover point | Source | Bins |
+|---|---|---|
+| Lookup outcome: translated, bypass, abort, each fault type | model | 10 |
+| Translated access: leaf size / read or write | model | 6 |
+| Stage 1 access type: read or write, data or instruction, privileged or not | model | 6 |
+| Fault type / level it was found at | model | 14 |
+| Permission fault / access type | model | 5 |
+| Terminated transaction: read or write, single beat or burst | model | 4 |
+| Fault recording: each recorded event, CD.R = 0, STE abort | model | 9 |
+| Cache path: configuration cached or fetched / TLB hit, walk cache hit, full walk | design | 6 |
+| TLB hit: entry size / allowed or permission fault | design | 6 |
+| Walk start level, including level 3 from the walk cache | design | 4 |
+| Command executed: every opcode, and an illegal one | design | 13 |
+| TLBI by address: command / Leaf | design | 4 |
+| TLBI by address: size of the TLB entry removed, or none | design | 4 |
+| CFGI: scope / whether an entry was removed | design | 6 |
+| Queues: wrap of each queue, overflow, fault while disabled | design | 4 |
+| Ordering: request while a command waits, command during a lookup, register invalidation during a lookup | design | 3 |
+
+`make test` runs `tb/coverage_report.py` last. It writes `build/coverage.md`
+(every bin with its hit count) and fails the regression if any bin is at zero,
+so a test that silently stops exercising something is noticed.
+
+**What the first run found.** 102 of 104 bins on one seed, and across seeds a
+bin that was only hit by luck:
+
+| Hole | Meaning | Closed by |
+|---|---|---|
+| TLB hit: 1 GB block / permission fault (2 MB only by chance) | The permission check on a TLB hit had never been run on a block entry in a directed test | block cases added to `permissions_checked_on_hit` |
+| CFGI range / nothing cached, CFGI all / nothing cached | Invalidating an empty configuration cache was never tried | commands added at the start of `cfgi_range_and_all` |
+| TLBI_NH_VAA with Leaf = 0 (random tests only) | No directed test used it | case added to `tlbi_by_asid_and_by_address` |
+
+No design bug was behind these holes, but each was untested behaviour.
+Result now: 104 of 104 on every seed tried (1 to 8 and 11 to 16).
+
+**Not in the coverage model:** bus errors on the unit's own port (cannot be
+produced by the memory model), the bypass datapath tests in test_bypass.py
+(they do not use the bench that samples coverage), AXI burst types and sizes.
+
+### 6.2 Formal proofs
+
+`make formal` proves properties of six blocks with SymbiYosys and the Z3
+solver, by k-induction: they hold from reset for any number of cycles and any
+input sequence. The properties live at the end of each module under
+`` `ifdef FORMAL``; the proof scripts are in `formal/`.
+
+| Block | What is proved |
+|---|---|
+| `sg_perm` | The permission rule equals its case table for every combination of inputs |
+| `sg_tagcache` | For any tag: a hit only if it was filled and not invalidated since; the data returned is the last data filled; no tag is stored twice; a fill is visible to the next lookup |
+| `sg_tlb` | For any page of any address space: no hit after an invalidation that names it, until it is filled again, whatever size of entry covered it; the output keeps the offset inside the page or block; a fill is visible to the next lookup |
+| `sg_addr_chan` | Nothing is sent downstream without a "forward" decision, and then only with the translated address and the device's own attributes; a request is terminated only after a "terminate" decision; one request at a time; VALID and payload stable until READY |
+| `sg_memrd` | One address request per read; data accepted only after it; the words handed back are the ones the memory returned; ARVALID stable until ARREADY |
+| `sg_evtq` | Nothing is written when the queue is disabled or full; one address then exactly four data beats with WLAST on the fourth; the pointer moves only after the memory accepted the record; at most one result per record; VALID and payload stable until READY |
+
+How the cache proofs work: the proof picks one arbitrary tag (or page) that the
+solver is free to choose, and keeps a small record of what the cache is allowed
+to hold for it. An invariant ties every entry to that record. Because the
+watched value is arbitrary, the result holds for all of them.
+
+**Limits of these proofs.**
+
+- They are block-level. Nothing is proved about the whole unit, for example
+  that the lookup control only fills the TLB with what the walker returned.
+- The TLB is proved with 4 entries (the design default is 8). With 8 the
+  solver's run time became unpredictable (from two minutes to more than 15,
+  depending on small changes to the proof); the logic is the same loop over
+  entries.
+- `sg_memrd` assumes its contract: the requester holds the address stable, and
+  the memory returns RLAST on the last beat.
+- `sg_addr_chan` is proved with narrow address and payload widths.
+- No liveness: the proofs say nothing wrong happens, not that something
+  eventually happens.
+
+## 7. Assertions
 
 | Name | Property |
 |---|---|
@@ -157,7 +243,7 @@ Directed tests, in test_queues.py unless noted:
 | `a_wq_no_overflow` | the W decision queue never overflows |
 | `a_tlb_single_hit`, `a_cache_single_hit` | no address matches more than one cache entry |
 
-## 7. Do the tests catch bugs?
+## 8. Do the tests catch bugs?
 
 A regression that passes proves little unless it can fail. Each of these bugs
 was put into the RTL, the regression run, and the change reverted.
@@ -204,7 +290,25 @@ was put into the RTL, the regression run, and the change reverted.
 | Interrupt on every record | `event_queue_interrupt` |
 | Event queue enable ignored | `event_queue_disabled`. The enable is checked in two places, so removing either check alone changes nothing; both had to be removed to see the failure |
 
-## 8. Results
+The same was done for the formal proofs: each must fail when its block is
+broken.
+
+| Injected bug | Proof that fails |
+|---|---|
+| Unprivileged check removed from the permission rule | `sg_perm` |
+| Selective invalidation does nothing | `sg_tagcache` |
+| Fill ignores an existing entry with the same tag | `sg_tagcache` (duplicate tag) |
+| Invalidation by address compares block entries as pages | `sg_tlb` |
+| Fill wins over an invalidation in the same cycle | `sg_tlb` |
+| 2 MB compare mask two bits short | `sg_tlb`. Passed at first: the proof used the design's own mask function, so it could not see a wrong mask. The proof now states "same page or block" separately |
+| 1 GB compare mask one bit long | `sg_tlb` |
+| Request forwarded after a fault | `sg_addr_chan` |
+| Untranslated address forwarded | `sg_addr_chan` |
+| Second word stored over the first | `sg_memrd` |
+| WLAST one beat early | `sg_evtq` |
+| Record written into a full queue | `sg_evtq` |
+
+## 9. Results
 
 | Milestone | Tests | Seeds | Result |
 |---|---|---|---|
@@ -212,6 +316,9 @@ was put into the RTL, the regression run, and the change reverted.
 | 2 | 33 | 1 to 8 | all pass |
 | 3 | 51 | 1 to 8 | all pass |
 | 4 | 72 | 1 to 8 | all pass |
+| 5 | 73 | 1 to 8, 11 to 16 | all pass, 104 of 104 coverage bins on every seed |
+
+Formal: 6 proofs pass by k-induction, about 30 seconds in total.
 
 Synthesis check (Yosys, generic gates, default parameters):
 
@@ -225,9 +332,8 @@ Synthesis check (Yosys, generic gates, default parameters):
 Most of the milestone 3 growth is cache storage: the TLB alone holds 8 entries
 of about 90 bits.
 
-## 9. Known gaps
+## 10. Known gaps
 
-- No functional coverage yet, so "which cases were hit" is not measured.
 - Reset is only tested while idle, not during a burst.
 - Narrow transfers, WRAP and FIXED bursts are forwarded untouched but not
   specifically tested.

@@ -1,0 +1,18 @@
+# Address channel: nothing is forwarded without a pass decision.
+# Run from the repository root with: make formal
+
+[options]
+mode prove
+depth 8
+
+[engines]
+smtbmc z3
+
+[script]
+read_verilog -sv -formal sg_addr_chan.sv
+chparam -set ADDR_W 16 -set SID_W 4 -set PAY_W 6 sg_addr_chan
+prep -top sg_addr_chan
+async2sync
+
+[files]
+rtl/sg_addr_chan.sv

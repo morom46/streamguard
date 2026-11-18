@@ -1,0 +1,17 @@
+# Tag cache: no hit after invalidation, no stale data, no duplicate tags.
+# Run from the repository root with: make formal
+
+[options]
+mode prove
+depth 6
+
+[engines]
+smtbmc z3
+
+[script]
+read_verilog -sv -formal sg_tagcache.sv
+prep -top sg_tagcache
+async2sync
+
+[files]
+rtl/sg_tagcache.sv

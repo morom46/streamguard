@@ -21,12 +21,14 @@ contains no Arm IP. What is and is not implemented is listed in
 | 2 | Stream table and context descriptor lookup, page table walker (AArch64, 4 KB granule, 2 MB and 1 GB blocks) | done |
 | 3 | TLB, walk cache and configuration cache, invalidation, hit counters | done |
 | 4 | Command queue (TLBI, CFGI, SYNC), event queue (fault records), GERROR, interrupts | done |
-| 5 | Functional coverage, formal properties | planned |
+| 5 | Functional coverage (104 bins, closed), formal proofs of six blocks | done |
 | 6 | TLB sizing study with synthesis area | planned |
 
-Regression: 72 tests, passing on 8 random seeds. Every translated access is
+Regression: 73 tests, passing on 14 random seeds. Every translated access is
 checked against a Python reference model, with the caches off and on, and the
-event queue is checked after every access.
+event queue is checked after every access. Functional coverage is 104 of 104
+bins. Six blocks have formal proofs (TLB, tag cache, permission check, address
+channel, memory read port, event queue writer).
 A TLB hit takes 4 cycles; a lookup that misses everything takes 44.
 
 ## Quick start
@@ -39,7 +41,8 @@ sudo apt install python3-venv build-essential perl
 source .venv/bin/activate
 
 make lint     # Verilator lint
-make test     # cocotb regression
+make test     # cocotb regression, writes build/coverage.md
+make formal   # formal proofs (SymbiYosys with Z3)
 make synth    # Yosys generic synthesis, prints a cell report
 ```
 
@@ -51,6 +54,7 @@ A fixed seed: `COCOTB_RANDOM_SEED=3 make test`.
 ```
 rtl/      SystemVerilog source
 tb/       cocotb testbench (Python) and its Makefile
+formal/   proof scripts; the properties are at the end of each rtl module
 docs/     architecture and verification plan
 scripts/  tool setup
 ```

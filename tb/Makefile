@@ -7,11 +7,12 @@
 SIM              ?= verilator
 TOPLEVEL_LANG    ?= verilog
 COCOTB_TOPLEVEL  ?= streamguard
-# every tb/test_*.py file is a test module
+# every tb/test_*.py file is a test module; coverage_report runs last and
+# checks the functional coverage collected by all of them
 comma := ,
 empty :=
 space := $(empty) $(empty)
-COCOTB_TEST_MODULES ?= $(subst $(space),$(comma),$(sort $(basename $(notdir $(wildcard $(CURDIR)/test_*.py)))))
+COCOTB_TEST_MODULES ?= $(subst $(space),$(comma),$(sort $(basename $(notdir $(wildcard $(CURDIR)/test_*.py))))),coverage_report
 
 RTL := $(abspath ../rtl)
 VERILOG_SOURCES := $(RTL)/sg_pkg.sv \

@@ -4,6 +4,8 @@
 #   make test    run the cocotb regression (writes build/coverage.md)
 #   make synth   generic synthesis with Yosys, prints a cell report
 #   make formal  prove the properties in formal/ (SymbiYosys with Z3)
+#   make validate  check the sizing study's model against the RTL (slow)
+#   make study   run the TLB sizing study, writes docs/sizing_study.md
 #   make clean
 
 RTL_SRCS := rtl/sg_pkg.sv \
@@ -23,7 +25,7 @@ RTL_SRCS := rtl/sg_pkg.sv \
 
 LINT_FLAGS := -Wall -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM -Wno-SYNCASYNCNET
 
-.PHONY: lint test synth formal clean
+.PHONY: lint test synth formal validate study clean
 
 lint:
 	verilator --lint-only $(LINT_FLAGS) --assert -DSG_ASSERT \
@@ -43,7 +45,7 @@ build:
 	mkdir -p build
 synth: | build
 
-FORMAL_PROOFS := sg_perm sg_tagcache sg_tlb sg_addr_chan sg_memrd sg_evtq
+FORMAL_PROOFS := sg_perm sg_tagcache sg_tlb sg_tlb_nru sg_addr_chan sg_memrd sg_evtq
 SBY := yowasp-sby --yosys yowasp-yosys --smtbmc yowasp-yosys-smtbmc
 
 formal: | build
@@ -53,5 +55,23 @@ formal: | build
 	    else echo "FAILED  $$p   (see build/formal_$$p.log)"; exit 1; fi; \
 	done
 
+# Cache configurations the study's model is checked against
+VALIDATE_CONFIGS := \
+    "TLB_ENTRIES=8 WC_ENTRIES=4 CFG_ENTRIES=4 TLB_POLICY=0" \
+    "TLB_ENTRIES=2 WC_ENTRIES=1 CFG_ENTRIES=1 TLB_POLICY=1" \
+    "TLB_ENTRIES=16 WC_ENTRIES=8 CFG_ENTRIES=2 TLB_POLICY=1" \
+    "TLB_ENTRIES=32 WC_ENTRIES=16 CFG_ENTRIES=8 TLB_POLICY=0"
+
+validate:
+	rm -rf build/validation
+	@for p in $(VALIDATE_CONFIGS); do \
+	    $(MAKE) -C tb COCOTB_TEST_MODULES=validate_model PARAMS="$$p" || exit 1; \
+	done
+	SG_READ_LATENCY=20 $(MAKE) -C tb COCOTB_TEST_MODULES=validate_model \
+	    PARAMS="TLB_ENTRIES=16 WC_ENTRIES=8 CFG_ENTRIES=2 TLB_POLICY=1"
+
+study:
+	cd study && python run_study.py
+
 clean:
-	rm -rf build tb/sim_build tb/results.xml tb/__pycache__ tb/*.fst
+	rm -rf build tb/sim_build* tb/results.xml tb/__pycache__ tb/*.fst

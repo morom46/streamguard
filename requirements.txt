@@ -5,3 +5,5 @@ cocotbext-axi==0.1.28
 verilator==5.48.0
 yowasp-yosys==0.71.0.0.post1285
 z3-solver==5.4.1.0
+# the sizing study's charts
+matplotlib==3.11.2

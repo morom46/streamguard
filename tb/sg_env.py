@@ -5,6 +5,7 @@
     Apb      minimal APB4 requester
 """
 
+import os
 import random
 
 import cocotb
@@ -41,6 +42,18 @@ GBPA_UPDATE = 1 << 31
 # bypass tests only use (and compare) the first RAM_SIZE bytes.
 RAM_SIZE = 1 << 16
 MEM_SIZE = 1 << 48
+
+
+# Design parameters, as built (tb/Makefile passes PARAMS in SG_PARAMS)
+DEFAULT_PARAMS = {"TLB_ENTRIES": 8, "WC_ENTRIES": 4, "CFG_ENTRIES": 4, "TLB_POLICY": 0}
+
+
+def design_params():
+    params = dict(DEFAULT_PARAMS)
+    for item in os.environ.get("SG_PARAMS", "").split():
+        name, value = item.split("=")
+        params[name] = int(value)
+    return params
 
 
 class Apb:

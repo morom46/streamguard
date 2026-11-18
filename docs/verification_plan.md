@@ -104,7 +104,50 @@ Directed tests in test_cache.py check the caches themselves.
 repoints the level 2 entry and invalidates, then releases. The access in
 flight completes with the old page; the next access must see the new one.
 
-## 5. Assertions
+## 5. Milestone 4 features and tests
+
+Two checks run inside every translation test from earlier milestones:
+
+- **Event queue after every access.** The reference model now also says
+  whether a fault is recorded. After each access the bench reads the event
+  queue: a recorded fault must have left exactly one record with the right
+  event number, StreamID, address and access type; anything else must have
+  left none.
+- **Targeted invalidation in the cached random tests.** After changing a
+  mapping the test picks, at random, one of the commands that is sufficient
+  for that change (TLBI_NH_VA with either Leaf value and any address inside
+  the mapping, TLBI_NH_VAA, TLBI_NH_ASID, TLBI_NH_ALL, TLBI_NSNH_ALL, or the
+  SG_INV register). It also switches streams between translate and abort, and
+  flips CD.R, each followed by a CFGI command. Every access must still match
+  the model, so a command that invalidates too little is caught.
+
+Directed tests, in test_queues.py unless noted:
+
+| Feature | Test |
+|---|---|
+| Commands consumed in order across the queue wrap, every batch size | `commands_consumed_across_wrap` |
+| Four-entry queues (LOG2SIZE = 2) for commands and events | `small_queues` |
+| Nothing fetched while CMDQEN = 0 | `commands_wait_for_cmdqen` |
+| TLBI_NH_VA: one page, Leaf 1 vs Leaf 0, other pages and ASIDs untouched | `tlbi_nh_va` |
+| TLBI_NH_VA with an address inside a 2 MB or 1 GB block | `tlbi_nh_va_inside_a_block` |
+| TLBI_NH_ASID and TLBI_NH_VAA | `tlbi_by_asid_and_by_address` |
+| TLBI_NH_ALL, TLBI_NSNH_ALL leave the configuration cache | `tlbi_all_keeps_the_configuration` |
+| Table change, TLBI, SYNC: old mapping before, new after | `stale_until_tlbi_and_sync` |
+| CFGI_STE: one stream, TLB kept | `cfgi_ste` |
+| CFGI_STE_RANGE and CFGI_ALL | `cfgi_range_and_all` |
+| CFGI_CD, CFGI_CD_ALL | `cfgi_cd` |
+| Illegal command: CONS and ERR, GERROR, interrupt, later commands held, resume after acknowledge, second error | `illegal_command_stops_the_queue` |
+| A command does not start during a lookup | `command_waits_for_lookup` |
+| Commands arriving non-stop during traffic from four streams | `commands_during_traffic` |
+| Record contents for each kind of fault | `event_record_contents` |
+| No record for abort or CD.R = 0, from a walk or a TLB hit | `faults_that_are_not_recorded` |
+| EVENTQEN = 0 | `event_queue_disabled` |
+| Overflow: records lost, flag set once, acknowledge, resume, second overflow | `event_queue_overflow` |
+| Interrupt only on empty to not empty, and enable bit | `event_queue_interrupt` |
+| Queue registers, pointer write protection | `queue_registers` (test_regs.py) |
+| IRQ_CTRL, GERROR, GERRORN | `irq_and_error_registers` (test_regs.py) |
+
+## 6. Assertions
 
 | Name | Property |
 |---|---|
@@ -114,7 +157,7 @@ flight completes with the old page; the next access must see the new one.
 | `a_wq_no_overflow` | the W decision queue never overflows |
 | `a_tlb_single_hit`, `a_cache_single_hit` | no address matches more than one cache entry |
 
-## 6. Do the tests catch bugs?
+## 7. Do the tests catch bugs?
 
 A regression that passes proves little unless it can fail. Each of these bugs
 was put into the RTL, the regression run, and the change reverted.
@@ -141,14 +184,34 @@ was put into the RTL, the regression run, and the change reverted.
 | Cache disable ignored by the configuration cache | `caches_can_be_disabled` |
 | Walks ending in any fault fill the TLB | `faults_are_not_cached`, both cached random tests |
 | Walk cache looked up with the previous request's ASID | `concurrent_streams_cached` only |
+| TLBI_NH_VA ignores the ASID | `tlbi_nh_va` |
+| Leaf = 1 also drops the walk cache | `tlbi_nh_va` |
+| Leaf = 0 keeps the walk cache | `tlbi_nh_va`, `command_waits_for_lookup` |
+| TLBI compares block entries as 4 KB pages | `tlbi_nh_va_inside_a_block` |
+| TLBI_NH_ASID leaves the walk cache | `tlbi_by_asid_and_by_address` |
+| CFGI range off by one | `cfgi_range_and_all` |
+| CFGI_CD does nothing | `cfgi_cd`, `cfgi_ste`, `cfgi_range_and_all`, both cached random tests |
+| Unknown opcode treated as legal | `illegal_command_stops_the_queue` |
+| Command starts without waiting for the lookup | `command_waits_for_lookup` |
+| Request accepted while a command is waiting | `commands_during_traffic` (missed at first; this test was added for it) |
+| CMDQ_CONS wrap ignores the queue size | `small_queues` |
+| RnW inverted in the event record | `event_record_contents` and 16 others |
+| Walk faults recorded whatever CD.R says | `faults_that_are_not_recorded`, both cached random tests |
+| TLB-hit permission fault ignores CD.R | `faults_that_are_not_recorded`, both cached random tests |
+| STE abort recorded as an event | `ste_configurations` and 7 others |
+| Record written into a full queue | `event_queue_overflow` |
+| Overflow flag toggles on every lost record | `event_queue_overflow` |
+| Interrupt on every record | `event_queue_interrupt` |
+| Event queue enable ignored | `event_queue_disabled`. The enable is checked in two places, so removing either check alone changes nothing; both had to be removed to see the failure |
 
-## 7. Results
+## 8. Results
 
 | Milestone | Tests | Seeds | Result |
 |---|---|---|---|
 | 1 | 17 | 1 to 8 | all pass |
 | 2 | 33 | 1 to 8 | all pass |
 | 3 | 51 | 1 to 8 | all pass |
+| 4 | 72 | 1 to 8 | all pass |
 
 Synthesis check (Yosys, generic gates, default parameters):
 
@@ -157,11 +220,12 @@ Synthesis check (Yosys, generic gates, default parameters):
 | 1 | 825 | 266 |
 | 2 | 2761 | 733 |
 | 3 | 13322 | 2268 |
+| 4 | 15364 | 2611 |
 
 Most of the milestone 3 growth is cache storage: the TLB alone holds 8 entries
 of about 90 bits.
 
-## 8. Known gaps
+## 9. Known gaps
 
 - No functional coverage yet, so "which cases were hit" is not measured.
 - Reset is only tested while idle, not during a burst.
@@ -182,5 +246,12 @@ of about 90 bits.
   tested.
 - The walk cache ASID bug above is caught by only one test; a directed test
   with two ASIDs in the same 2 MB region would be stronger.
-- Invalidation is all or nothing through a StreamGuard-specific register until
-  the command queue adds the architected commands.
+- Bus errors on the unit's own port are still untested: the memory model never
+  returns an error. That leaves CERROR_ABT and GERROR.EVENTQ_ABT_ERR
+  implemented but unexercised, along with the fetch aborts from milestone 2.
+- The commands and the event layout come from the same reading of the
+  specification as the tests. The new rows in the spec cross-check table list
+  what has to be confirmed against the text.
+- No test drives the queues the way a real driver would (Linux's
+  arm-smmu-v3 probe and command sequences).
+- LOG2SIZE above the maximum is capped in the RTL but not tested.

@@ -20,12 +20,13 @@ contains no Arm IP. What is and is not implemented is listed in
 | 1 | APB register block, AXI4 bypass path, terminate with SLVERR | done |
 | 2 | Stream table and context descriptor lookup, page table walker (AArch64, 4 KB granule, 2 MB and 1 GB blocks) | done |
 | 3 | TLB, walk cache and configuration cache, invalidation, hit counters | done |
-| 4 | Command queue (TLBI, CFGI, SYNC) and event queue (fault records) | planned |
-| 5 | Reference model, functional coverage, formal properties | planned |
+| 4 | Command queue (TLBI, CFGI, SYNC), event queue (fault records), GERROR, interrupts | done |
+| 5 | Functional coverage, formal properties | planned |
 | 6 | TLB sizing study with synthesis area | planned |
 
-Regression: 51 tests, passing on 8 random seeds. Every translated access is
-checked against a Python reference model, with the caches off and on.
+Regression: 72 tests, passing on 8 random seeds. Every translated access is
+checked against a Python reference model, with the caches off and on, and the
+event queue is checked after every access.
 A TLB hit takes 4 cycles; a lookup that misses everything takes 44.
 
 ## Quick start

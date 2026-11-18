@@ -140,6 +140,15 @@ async def permissions_checked_on_hit(dut):
     await b.expect(model.FC_NONE, sid=1, va=NOEXEC_U, prot=PRIV | INSTR)
     assert b.last_reads == 0
 
+    # the same on block entries (found missing by functional coverage)
+    M2, G1 = 0x0000_4020_0000, 0x0080_4000_0000
+    ctx.map(M2, DATA_HI | 0x0001_0060_0000, BLOCK_2M, ro=1)
+    ctx.map(G1, DATA_HI | 0x0033_C000_0000, BLOCK_1G, ro=1)
+    for va, level in ((M2 + 0x1_2340, 2), (G1 + 0x123_4560, 1)):
+        await b.expect(model.FC_NONE, level, sid=1, va=va)
+        await b.expect(model.FC_PERMISSION, level, sid=1, va=va + 0x1000, write=True)
+        assert b.last_reads == 0, "permission fault must come from the block's TLB entry"
+
 
 @cocotb.test()
 async def faults_are_not_cached(dut):

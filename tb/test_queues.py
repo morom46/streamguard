@@ -174,6 +174,10 @@ async def tlbi_by_asid_and_by_address(dut):
     assert [await reads(b, sid, Y) for sid in (1, 2)] == [0, 0]
     assert [await reads(b, sid, X) for sid in (1, 2)] == [1, 1], "leaf only: walk cache kept"
 
+    await b.cmds([q.tlbi_nh_vaa(Y, leaf=0)])
+    assert [await reads(b, sid, X) for sid in (1, 2)] == [0, 0]
+    assert [await reads(b, sid, Y) for sid in (1, 2)] == [4, 4], "walk cache dropped too"
+
 
 @cocotb.test()
 async def tlbi_all_keeps_the_configuration(dut):
@@ -242,6 +246,7 @@ async def cfgi_ste(dut):
 async def cfgi_range_and_all(dut):
     b = Bench(dut, caches=True)
     await b.start()
+    await b.cmds([q.cfgi_ste_range(0, 3), q.cfgi_all()])    # nothing cached yet: harmless
     sids = (4, 5, 6, 9)                            # fills the configuration cache
     for sid in sids:
         b.add_stream(sid).map(0x3000, DATA_HI | (sid << 12))

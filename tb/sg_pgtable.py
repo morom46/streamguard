@@ -67,8 +67,10 @@ def write_ste(mem, strtab_base, sid, cfg, cd_addr=0, valid=1, s1fmt=0):
 
 
 def write_cd(mem, cd_addr, ttb, t0sz=16, valid=1, aa64=1, tg0=0, epd0=0,
-             endi=0, affd=0, asid=0):
+             endi=0, affd=0, asid=0, r=1, a=1):
+    """r: record stage 1 faults in the event queue. a: abort faulting
+    transactions (the hardware always does, whatever this bit says)."""
     mem.write_qword(cd_addr, t0sz | (tg0 << 6) | (epd0 << 14) | (endi << 15)
                     | (valid << 31) | (affd << 35) | (aa64 << 41)
-                    | ((asid & 0xFF) << 48))
+                    | (r << 45) | (a << 46) | ((asid & 0xFF) << 48))
     mem.write_qword(cd_addr + 8, ttb)

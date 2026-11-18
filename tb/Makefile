@@ -21,6 +21,8 @@ VERILOG_SOURCES := $(RTL)/sg_pkg.sv \
                    $(RTL)/sg_tlb.sv \
                    $(RTL)/sg_apb_regs.sv \
                    $(RTL)/sg_memrd.sv \
+                   $(RTL)/sg_cmdq.sv \
+                   $(RTL)/sg_evtq.sv \
                    $(RTL)/sg_ptw.sv \
                    $(RTL)/sg_xlate.sv \
                    $(RTL)/sg_addr_chan.sv \
@@ -29,6 +31,11 @@ VERILOG_SOURCES := $(RTL)/sg_pkg.sv \
 
 # Assertions on, lint warnings do not stop the build (make lint does that)
 EXTRA_ARGS += --assert -DSG_ASSERT -Wno-fatal
+
+# Compile the model as a single C++ file. Above a certain design size
+# Verilator splits it and uses a precompiled header, which the PyPI
+# build of Verilator does not set up correctly.
+EXTRA_ARGS += --output-split 0
 
 ifeq ($(WAVES),1)
 EXTRA_ARGS += --trace-fst --trace-structs

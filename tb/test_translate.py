@@ -18,6 +18,7 @@ from cocotb.triggers import Combine, RisingEdge, with_timeout
 from cocotbext.axi import AxiProt, AxiResp
 
 import sg_model as model
+import sg_queues as q
 from sg_bench import DATA_HI, PRIV, TIMEOUT_NS, UNPRIV, Bench, pattern
 from sg_pgtable import (BLOCK_1G, BLOCK_2M, LEVEL_SHIFT, PAGE, Context,
                         leaf_desc, table_desc, write_cd, write_ste)
@@ -342,8 +343,6 @@ def build_random_stream(b, sid):
 def remap_random_leaf(b, ctx):
     """Point one existing mapping somewhere else with new attributes."""
     rng = b.rng
-    if not ctx.leaves:
-        return
     va, level = rng.choice(ctx.leaves)
     size = 1 << LEVEL_SHIFT[level]
     pa = DATA_HI | (rng.randrange((1 << 47) // size) * size)
@@ -351,6 +350,45 @@ def remap_random_leaf(b, ctx):
             af=int(rng.random() < 0.85), el0=int(rng.random() < 0.8),
             ro=int(rng.random() < 0.3), pxn=int(rng.random() < 0.2),
             uxn=int(rng.random() < 0.2))
+    return va, level
+
+
+async def random_change(b, streams, stats):
+    """Change something the hardware may have cached, then invalidate in
+    one of the ways that is sufficient for that change."""
+    rng = b.rng
+    sid = rng.randint(1, 6)
+    ctx = streams[sid][2]
+    done = sum(stats.values())
+    kind = (0.0, 0.7, 0.9)[done] if done < 3 else rng.random()   # each kind at least once
+    if kind < 0.6 and ctx.leaves:
+        # one mapping moved: any command that covers its TLB entry will do
+        va, level = remap_random_leaf(b, ctx)
+        size = 1 << LEVEL_SHIFT[level]
+        va = (va & ~(size - 1)) + (rng.randrange(size) & ~0xFFF)    # any page in it
+        cmd = rng.choice([
+            q.tlbi_nh_va(ctx.asid, va, leaf=1), q.tlbi_nh_va(ctx.asid, va, leaf=1),
+            q.tlbi_nh_va(ctx.asid, va, leaf=0), q.tlbi_nh_vaa(va, leaf=rng.randint(0, 1)),
+            q.tlbi_nh_asid(ctx.asid), q.tlbi_nh_all(), q.tlbi_nsnh_all(), None])
+        if cmd is None:
+            await b.env.invalidate_all()               # StreamGuard's own register
+        else:
+            await b.cmds([cmd])
+        stats["remap"] += 1
+    elif kind < 0.8:
+        # stream switched between translating and abort
+        ctx.aborted = not getattr(ctx, "aborted", False)
+        write_ste(b.mem, b.strtab, sid,
+                  model.STE_CFG_ABORT if ctx.aborted else model.STE_CFG_S1, ctx.cd_addr)
+        await b.cmds([rng.choice([q.cfgi_ste(sid), q.cfgi_ste_range(sid, rng.randint(0, 31)),
+                                  q.cfgi_all()])])
+        stats["ste"] += 1
+    else:
+        # CD.R flipped: this stream's faults stop or start being recorded
+        cd0 = b.mem.read_qword(ctx.cd_addr)
+        b.mem.write_qword(ctx.cd_addr, cd0 ^ (1 << 45))
+        await b.cmds([rng.choice([q.cfgi_cd(sid), q.cfgi_cd_all(sid), q.cfgi_ste(sid)])])
+        stats["cd"] += 1
 
 
 def random_access(rng, span, targets, ctx=None):
@@ -372,9 +410,12 @@ async def random_run(dut, backpressure, n_access, caches=False):
     """Random tables with faulty entries, random accesses from six
     streams plus bypass, abort, invalid and out-of-range StreamIDs.
 
-    With caches on, mappings are also changed now and then. Each change
-    is followed by an invalidation, as software must do, so the result
-    must still match the model for every access."""
+    With caches on, mappings and stream configurations are also changed
+    now and then. Each change is followed by a command that invalidates
+    just enough, as software must do, so the result must still match
+    the model for every access.
+
+    Either way the event queue is checked after every access."""
     b = Bench(dut, caches=caches)
     await b.start(backpressure)
     streams = {sid: build_random_stream(b, sid) for sid in range(1, 7)}
@@ -382,14 +423,12 @@ async def random_run(dut, backpressure, n_access, caches=False):
     write_ste(b.mem, b.strtab, 8, model.STE_CFG_ABORT)
 
     seen = {}
-    remaps = total_reads = predicted_reads = 0
+    total_reads = predicted_reads = 0
+    stats = {"remap": 0, "ste": 0, "cd": 0}
     recent = {}
     for _ in range(n_access):
-        if caches and b.rng.random() < 0.05:
-            if b.rng.random() < 0.8:
-                remap_random_leaf(b, streams[b.rng.randint(1, 6)][2])
-                remaps += 1
-            await b.env.invalidate_all()
+        if caches and b.rng.random() < 0.08:
+            await random_change(b, streams, stats)
         sid = b.rng.choice([1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 7, 8, 9, 40])
         if sid in streams and caches and sid in recent and b.rng.random() < 0.4:
             # locality: the same page again, or a neighbour in the same 2 MB region
@@ -417,13 +456,13 @@ async def random_run(dut, backpressure, n_access, caches=False):
         assert (True, code) in seen, f"random test never hit {model.FC_NAMES[code]}"
     assert seen.get((False, model.FC_NONE), 0) > n_access // 10
 
-    dut._log.info("table reads: %d made, %d without caches; %d remaps",
-                  total_reads, predicted_reads, remaps)
+    dut._log.info("table reads: %d made, %d without caches; changes: %s",
+                  total_reads, predicted_reads, stats)
     if caches:
         c = await b.env.counters()
         dut._log.info("counters: %s", c)
         assert c["tlb_hit"] > 0 and c["cfg_hit"] > 0 and c["wc_hit"] > 0, c
-        assert remaps > 0
+        assert stats["remap"] > 0 and stats["ste"] > 0 and stats["cd"] > 0, stats
         assert total_reads < predicted_reads
 
 

@@ -20,7 +20,8 @@ module streamguard #(
   parameter int unsigned SID_W  = 8,
   parameter int unsigned TLB_ENTRIES = 8,
   parameter int unsigned WC_ENTRIES  = 4,
-  parameter int unsigned CFG_ENTRIES = 4
+  parameter int unsigned CFG_ENTRIES = 4,
+  parameter int unsigned TLB_POLICY  = 0     // 0: round robin, 1: not recently used
 ) (
   input  logic                clk,
   input  logic                rst_n,
@@ -315,7 +316,8 @@ module streamguard #(
 
   sg_xlate #(
     .ADDR_W(ADDR_W), .SID_W(SID_W),
-    .TLB_ENTRIES(TLB_ENTRIES), .WC_ENTRIES(WC_ENTRIES), .CFG_ENTRIES(CFG_ENTRIES)
+    .TLB_ENTRIES(TLB_ENTRIES), .WC_ENTRIES(WC_ENTRIES), .CFG_ENTRIES(CFG_ENTRIES),
+    .TLB_POLICY(TLB_POLICY)
   ) u_xlate (
     .clk, .rst_n,
     .smmuen_i     (smmuen),

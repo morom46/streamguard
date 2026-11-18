@@ -44,7 +44,8 @@ module sg_xlate #(
   parameter int unsigned SID_W       = 8,
   parameter int unsigned TLB_ENTRIES = 8,
   parameter int unsigned WC_ENTRIES  = 4,
-  parameter int unsigned CFG_ENTRIES = 4
+  parameter int unsigned CFG_ENTRIES = 4,
+  parameter int unsigned TLB_POLICY  = 0     // 0: round robin, 1: NRU
 ) (
   input  logic              clk,
   input  logic              rst_n,
@@ -397,7 +398,7 @@ module sg_xlate #(
   logic [47:0]       tlb_pa;
   logic              tlb_ap1, tlb_ap2, tlb_pxn, tlb_uxn;
 
-  sg_tlb #(.ENTRIES(TLB_ENTRIES), .ASID_W(8)) u_tlb (
+  sg_tlb #(.ENTRIES(TLB_ENTRIES), .ASID_W(8), .POLICY(TLB_POLICY)) u_tlb (
     .clk, .rst_n,
     .inv_all    (inv_i),
     .inv_sel    (cmd_tlb_inv),
@@ -414,6 +415,7 @@ module sg_xlate #(
     .hit_ap2    (tlb_ap2),
     .hit_pxn    (tlb_pxn),
     .hit_uxn    (tlb_uxn),
+    .touch      (tlb_touch),
     .fill       (tlb_fill),
     .fill_asid  (cur_asid_q),
     .fill_level (ptw_flevel),
@@ -426,6 +428,10 @@ module sg_xlate #(
   );
 
   assign tlb_hit = tlb_hit_raw & ~cache_dis_i;
+
+  // A TLB hit that is used to answer a request (for the NRU policy)
+  logic tlb_touch;
+  assign tlb_touch = (state_q == X_LOOKUP) & eff_valid & (eff_kind == K_S1) & tlb_hit;
 
   // A walk that found a usable leaf: successful, or stopped only by
   // the permission check

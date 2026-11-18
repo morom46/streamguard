@@ -22,9 +22,12 @@ from cocotbext.axi import AxiProt, AxiResp
 import sg_model as model
 from sg_bench import (DATA_HI, PRIV, TIMEOUT_NS, UNPRIV, Bench,
                       HoldTableReads)
+from sg_env import design_params
 from sg_pgtable import BLOCK_1G, BLOCK_2M, PAGE, leaf_desc, table_desc
 
-TLB_ENTRIES = 8          # must match the streamguard defaults
+PARAMS = design_params()
+TLB_ENTRIES = PARAMS["TLB_ENTRIES"]
+NRU = PARAMS["TLB_POLICY"] == 1
 WC_ENTRIES = 4
 
 
@@ -354,27 +357,36 @@ async def counters_clear(dut):
 # ---------------------------------------------------------------------
 @cocotb.test()
 async def tlb_replacement(dut):
-    """Fill every entry, then one more: the oldest fill is replaced."""
+    """Fill every entry, use the first half of them again, then miss.
+
+    Round robin replaces the oldest fill (entry 0) even though it was
+    just used. NRU replaces the lowest entry not used since the fills,
+    so the entries that were used again all stay."""
     b = Bench(dut, caches=True)
     await b.start()
     ctx = b.add_stream(1)
-    pages = [(k << 21) | 0x3000 for k in range(TLB_ENTRIES + 1)]   # one per 2 MB region
+    n = TLB_ENTRIES
+    pages = [(k << 21) | 0x3000 for k in range(n + 1)]     # one per 2 MB region
     for k, va in enumerate(pages):
         ctx.map(va, DATA_HI | (k << 12))
 
-    for va in pages[:TLB_ENTRIES]:
+    for va in pages[:n]:
         await b.access(sid=1, va=va)
-    for va in pages[:TLB_ENTRIES]:
+    for va in pages[:n // 2]:
         await b.access(sid=1, va=va)
         assert b.last_reads == 0, "all entries should still be cached"
 
-    await b.access(sid=1, va=pages[TLB_ENTRIES])       # replaces entry 0
-    await b.access(sid=1, va=pages[TLB_ENTRIES])
+    await b.access(sid=1, va=pages[n])                   # one replacement
+    await b.access(sid=1, va=pages[n])
     assert b.last_reads == 0
-    await b.access(sid=1, va=pages[0])
-    assert b.last_reads > 0, "first page should have been replaced"
-    await b.access(sid=1, va=pages[2])
-    assert b.last_reads == 0
+
+    victim = n // 2 if NRU else 0
+    for k in range(n):
+        if k != victim:
+            await b.access(sid=1, va=pages[k])
+            assert b.last_reads == 0, f"page {k} should still be cached"
+    await b.access(sid=1, va=pages[victim])
+    assert b.last_reads > 0, f"page {victim} should have been replaced"
 
 
 # ---------------------------------------------------------------------

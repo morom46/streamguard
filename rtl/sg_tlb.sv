@@ -12,7 +12,16 @@
 //
 // Lookup is combinational. A fill writes, in order of preference, an
 // entry that already holds the same translation, the first empty
-// entry, or the round robin victim.
+// entry, or a victim chosen by the replacement policy:
+//
+//   POLICY = 0  round robin: entries are replaced in turn, whether
+//               they are being used or not
+//   POLICY = 1  not recently used (NRU): one "used" bit per entry, set
+//               when the entry is filled or when a hit on it is used
+//               (touch). When the last bit would be set, all the
+//               others are cleared instead. The victim is the lowest
+//               numbered entry whose bit is clear, so an entry that
+//               was hit since the last clear is never replaced.
 //
 // Invalidation. inv_all clears every entry. inv_sel clears the entries
 // selected by the command: those with inv_asid if inv_asid_en is set,
@@ -26,7 +35,8 @@
 
 module sg_tlb #(
   parameter int unsigned ENTRIES = 8,
-  parameter int unsigned ASID_W  = 8
+  parameter int unsigned ASID_W  = 8,
+  parameter int unsigned POLICY  = 0      // 0: round robin, 1: NRU
 ) (
   input  logic              clk,
   input  logic              rst_n,
@@ -48,6 +58,7 @@ module sg_tlb #(
   output logic              hit_ap2,
   output logic              hit_pxn,
   output logic              hit_uxn,
+  input  logic              touch,        // the hit above was used (NRU only)
 
   // Fill
   input  logic              fill,
@@ -70,6 +81,7 @@ module sg_tlb #(
   logic [ENTRIES-1:0][35:0]       ptag_q;     // PA[47:12]
   logic [ENTRIES-1:0][3:0]        perm_q;     // {ap1, ap2, pxn, uxn}
   logic [IDX_W-1:0]               rr_q;
+  logic [ENTRIES-1:0]             used_q;     // NRU only
 
   // Which of VA[47:12] take part in the compare at each level
   function automatic [35:0] tag_mask(input [1:0] lvl);
@@ -113,7 +125,20 @@ module sg_tlb #(
   // ---------------- victim selection ----------------
   logic [35:0]      fmask;
   logic [IDX_W-1:0] victim;
-  logic             victim_is_rr;
+  logic             victim_is_rr;      // chosen by the policy
+  logic [IDX_W-1:0] nru_idx;           // lowest entry not recently used
+
+  always_comb begin
+    logic found;
+    found   = 1'b0;
+    nru_idx = '0;
+    for (int i = 0; i < ENTRIES; i++) begin
+      if (!found && !used_q[i]) begin
+        found   = 1'b1;
+        nru_idx = IDX_W'(i);
+      end
+    end
+  end
 
   assign fmask = tag_mask(fill_level);
 
@@ -136,7 +161,9 @@ module sg_tlb #(
       end
     end
     victim_is_rr = !found_dup && !found_free;
-    victim       = found_dup ? dup_idx : found_free ? free_idx : rr_q;
+    victim       = found_dup  ? dup_idx  :
+                   found_free ? free_idx :
+                   (POLICY == 1) ? nru_idx : rr_q;
   end
 
   // ---------------- selective invalidation ----------------
@@ -174,6 +201,33 @@ module sg_tlb #(
         rr_q <= (rr_q == IDX_W'(ENTRIES - 1)) ? '0 : rr_q + 1'b1;
       end
     end
+  end
+
+  // ---------------- NRU used bits ----------------
+  // Only built when the NRU policy is selected; with round robin the
+  // bits are constant zero and take no area.
+  if (POLICY == 1) begin : g_nru
+    logic [ENTRIES-1:0] mark, used_set;
+
+    always_comb begin
+      mark = '0;
+      if (touch && hit) mark[hit_idx] = 1'b1;
+      if (fill)         mark[victim]  = 1'b1;
+      used_set = used_q | mark;
+      // never let every bit be set: keep only the newest marks
+      if (&used_set) used_set = mark;
+    end
+
+    always_ff @(posedge clk or negedge rst_n) begin
+      if (!rst_n)       used_q <= '0;
+      else if (inv_all) used_q <= '0;
+      else if (inv_sel) used_q <= used_q & ~inv_vec;
+      else              used_q <= used_set;
+    end
+  end else begin : g_no_nru
+    assign used_q = '0;
+    logic unused_touch;
+    assign unused_touch = touch;
   end
 
 `ifdef SG_ASSERT
@@ -245,6 +299,13 @@ module sg_tlb #(
         if (hit_level == 2'd1) assert (hit_pa[29:0] == lk_va[29:0]);
       end
     end
+    // 4. NRU: there is always an entry not recently used, and the
+    //    policy never picks one that is marked used.
+    if (rst_n && POLICY == 1 && ENTRIES > 1) begin
+      assert (!(&used_q));
+      if (fill && victim_is_rr) assert (!used_q[victim]);
+    end
+
     // 3. A fill is visible to the next lookup of that address.
     if (f_past_valid && rst_n && $past(rst_n) &&
         $past(fill && !inv_all && !inv_sel) &&

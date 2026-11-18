@@ -60,7 +60,10 @@ the tables from memory through its own port and answers translation requests.
 | `irq_eventq`, `irq_gerror` | one cycle pulses | to interrupt controller | event queue went from empty to not empty; a global error became active |
 | `s_apb_*` | APB4, 17-bit address | from software | registers |
 
-Parameters: `ADDR_W` (48), `DATA_W` (64), `ID_W` (4), `SID_W` (8).
+Parameters: `ADDR_W` (48), `DATA_W` (64), `ID_W` (4), `SID_W` (8),
+`TLB_ENTRIES` (8), `WC_ENTRIES` (4), `CFG_ENTRIES` (4), `TLB_POLICY` (0: round
+robin, 1: not recently used). The cache sizes and the policy were studied in
+[the sizing study](sizing_study.md).
 Reset is active low, asserted asynchronously.
 
 ## 4. Datapath behaviour
@@ -206,7 +209,22 @@ ASID share entries, which is the architected meaning of an ASID: software must
 give separate address spaces separate ASIDs.
 
 **Replacement.** An entry holding the same translation is overwritten,
-otherwise the first empty entry is used, otherwise a round robin victim.
+otherwise the first empty entry is used, otherwise the policy chooses. The walk
+cache and configuration cache use round robin. The TLB has two policies,
+selected by `TLB_POLICY`:
+
+- **Round robin**: entries are replaced in turn, used or not.
+- **Not recently used (NRU)**: one bit per entry, set when the entry is filled
+  or when a lookup uses a hit on it. When setting a bit would set them all,
+  the others are cleared instead. The victim is the lowest numbered entry
+  whose bit is clear, so an entry hit since the last clear is never replaced.
+  The logic is only built when selected; it costs one flip-flop per entry
+  and a priority encoder.
+
+The sizing study found NRU equal or better on every workload from 8 entries
+up, at a cost of 5 flip-flops in the default size. The default stays round
+robin so that earlier results remain reproducible; `TLB_POLICY=1` is the
+recommended setting.
 
 **Invalidation.** The architected way is the command queue (section 6): TLBI
 commands for the TLB and walk cache, CFGI commands for the configuration
@@ -417,6 +435,8 @@ relied on by a later milestone.
 | D20 | The event is written before the fault response | When the device sees the error, the record is already there for the handler; costs a few cycles on the fault path only |
 | D21 | Recording never changes the outcome | A full or disabled event queue must not turn a blocked access into an allowed one, or stall the bus |
 | D22 | Queue stops on a bad command | Later commands may depend on it; skipping one invalidation silently would leave stale entries |
+| D23 | NRU rather than true LRU as the second TLB policy | LRU needs an ordering of all entries (log2(N) bits each, or a matrix); NRU needs one bit each and still protects entries that are being used |
+| D24 | Cache sizes and policy as parameters, chosen by measurement | The sizing study replays traffic through a model checked against the RTL, so the choice rests on data, not on a guess |
 
 ## 9. Scope
 

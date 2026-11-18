@@ -22,7 +22,7 @@ contains no Arm IP. What is and is not implemented is listed in
 | 3 | TLB, walk cache and configuration cache, invalidation, hit counters | done |
 | 4 | Command queue (TLBI, CFGI, SYNC), event queue (fault records), GERROR, interrupts | done |
 | 5 | Functional coverage (104 bins, closed), formal proofs of six blocks | done |
-| 6 | TLB sizing study with synthesis area | planned |
+| 6 | Second TLB policy (NRU), TLB sizing study with a model checked against the RTL | done |
 
 Regression: 73 tests, passing on 14 random seeds. Every translated access is
 checked against a Python reference model, with the caches off and on, and the
@@ -30,6 +30,21 @@ event queue is checked after every access. Functional coverage is 104 of 104
 bins. Six blocks have formal proofs (TLB, tag cache, permission check, address
 channel, memory read port, event queue writer).
 A TLB hit takes 4 cycles; a lookup that misses everything takes 44.
+
+## Results
+
+- **Sizing study** ([report](docs/sizing_study.md)): 240 cache configurations
+  replayed over four device workloads, including an NPU running a
+  convolution layer, with area from synthesis. Switching the TLB from round
+  robin to not-recently-used cuts translation time by 9% at the same size,
+  with no workload slower, for 5 flip-flops. Mapping the NPU's buffers with
+  2 MB blocks does more than any TLB size.
+- **Model checked against the RTL**: across 205,305 replayed accesses the
+  study's cache model matches the hardware's hit counters, table reads and
+  translation cycles exactly.
+- **Verification**: 73 tests with a reference model, 104 of 104 functional
+  coverage bins, 7 formal proofs, and every check shown to fail on
+  deliberately injected bugs ([verification plan](docs/verification_plan.md)).
 
 ## Quick start
 
@@ -44,7 +59,12 @@ make lint     # Verilator lint
 make test     # cocotb regression, writes build/coverage.md
 make formal   # formal proofs (SymbiYosys with Z3)
 make synth    # Yosys generic synthesis, prints a cell report
+
+make validate # check the sizing study's model against the RTL (about 4 minutes)
+make study    # run the sizing study; synthesises every cache size the first time
 ```
+
+Another build of the design: `make -C tb PARAMS="TLB_POLICY=1"`.
 
 Waveforms: `make -C tb WAVES=1` writes `tb/dump.fst` (open with GTKWave or Surfer).
 A fixed seed: `COCOTB_RANDOM_SEED=3 make test`.
@@ -55,6 +75,7 @@ A fixed seed: `COCOTB_RANDOM_SEED=3 make test`.
 rtl/      SystemVerilog source
 tb/       cocotb testbench (Python) and its Makefile
 formal/   proof scripts; the properties are at the end of each rtl module
+study/    sizing study: workloads, cache model, area, report generator
 docs/     architecture and verification plan
 scripts/  tool setup
 ```
@@ -63,3 +84,4 @@ scripts/  tool setup
 
 - [Architecture](docs/architecture.md): block diagram, interfaces, register map, design decisions
 - [Verification plan](docs/verification_plan.md): what is tested, how, and current results
+- [Sizing study](docs/sizing_study.md): how big the caches should be, and which TLB policy

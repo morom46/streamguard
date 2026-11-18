@@ -200,7 +200,8 @@ produced by the memory model), the bypass datapath tests in test_bypass.py
 
 ### 6.2 Formal proofs
 
-`make formal` proves properties of six blocks with SymbiYosys and the Z3
+`make formal` proves properties of six blocks (seven proofs: the TLB is proved
+once for each replacement policy) with SymbiYosys and the Z3
 solver, by k-induction: they hold from reset for any number of cycles and any
 input sequence. The properties live at the end of each module under
 `` `ifdef FORMAL``; the proof scripts are in `formal/`.
@@ -209,7 +210,7 @@ input sequence. The properties live at the end of each module under
 |---|---|
 | `sg_perm` | The permission rule equals its case table for every combination of inputs |
 | `sg_tagcache` | For any tag: a hit only if it was filled and not invalidated since; the data returned is the last data filled; no tag is stored twice; a fill is visible to the next lookup |
-| `sg_tlb` | For any page of any address space: no hit after an invalidation that names it, until it is filled again, whatever size of entry covered it; the output keeps the offset inside the page or block; a fill is visible to the next lookup |
+| `sg_tlb` | For any page of any address space: no hit after an invalidation that names it, until it is filled again, whatever size of entry covered it; the output keeps the offset inside the page or block; a fill is visible to the next lookup. Proved for round robin and for NRU, where it also proves that some entry is always not recently used and that the policy never picks one that is |
 | `sg_addr_chan` | Nothing is sent downstream without a "forward" decision, and then only with the translated address and the device's own attributes; a request is terminated only after a "terminate" decision; one request at a time; VALID and payload stable until READY |
 | `sg_memrd` | One address request per read; data accepted only after it; the words handed back are the ones the memory returned; ARVALID stable until ARREADY |
 | `sg_evtq` | Nothing is written when the queue is disabled or full; one address then exactly four data beats with WLAST on the fourth; the pointer moves only after the memory accepted the record; at most one result per record; VALID and payload stable until READY |
@@ -233,7 +234,39 @@ watched value is arbitrary, the result holds for all of them.
 - No liveness: the proofs say nothing wrong happens, not that something
   eventually happens.
 
-## 7. Assertions
+## 7. Milestone 6: second TLB policy and the sizing study
+
+**The NRU policy.** `make -C tb PARAMS="TLB_POLICY=1"` builds the design with
+NRU and runs the whole regression on it: all 73 tests pass and coverage is
+104 of 104. `tlb_replacement` checks each policy's own choice: after every
+entry is filled and the first half are used again, round robin replaces entry
+0 and NRU replaces the first entry that was not used again. The `sg_tlb_nru`
+proof covers it formally (section 6.2).
+
+**The study's model.** The sizing study (docs/sizing_study.md) rests on a fast
+Python model of the caches. `make validate` checks it against the RTL:
+`tb/validate_model.py` replays every study workload through the RTL in four
+cache configurations, one access at a time, and compares
+
+- the hardware's hit and miss counters and its table reads with the model's,
+  in total and access by access
+- the measured translation time of every access with the model's latency
+  formula, and that the fixed overhead of each lookup path is the same on
+  every access
+- the same again with every table read slowed by about 20 cycles, to check
+  that the overheads do not depend on memory latency
+
+| Configuration | Runs | Accesses | Result |
+|---|---|---|---|
+| TLB 8 round robin, walk cache 4, config cache 4 | 5 | 41,061 | equal |
+| TLB 2 NRU, walk cache 1, config cache 1 | 5 | 41,061 | equal |
+| TLB 16 NRU, walk cache 8, config cache 2 | 5 | 41,061 | equal |
+| TLB 16 NRU, walk cache 8, config cache 2, slower memory | 5 | 41,061 | equal |
+| TLB 32 round robin, walk cache 16, config cache 8 | 5 | 41,061 | equal |
+
+Every one of the eight lookup paths appeared, each with one fixed overhead.
+
+## 8. Assertions
 
 | Name | Property |
 |---|---|
@@ -243,7 +276,7 @@ watched value is arbitrary, the result holds for all of them.
 | `a_wq_no_overflow` | the W decision queue never overflows |
 | `a_tlb_single_hit`, `a_cache_single_hit` | no address matches more than one cache entry |
 
-## 8. Do the tests catch bugs?
+## 9. Do the tests catch bugs?
 
 A regression that passes proves little unless it can fail. Each of these bugs
 was put into the RTL, the regression run, and the change reverted.
@@ -302,13 +335,16 @@ broken.
 | Fill wins over an invalidation in the same cycle | `sg_tlb` |
 | 2 MB compare mask two bits short | `sg_tlb`. Passed at first: the proof used the design's own mask function, so it could not see a wrong mask. The proof now states "same page or block" separately |
 | 1 GB compare mask one bit long | `sg_tlb` |
+| NRU: all used bits may become set | `sg_tlb_nru` |
+| NRU: victim ignores the used bits | `sg_tlb_nru` |
+| NRU: selective invalidation does nothing | `sg_tlb_nru` (the shared properties hold for this policy too) |
 | Request forwarded after a fault | `sg_addr_chan` |
 | Untranslated address forwarded | `sg_addr_chan` |
 | Second word stored over the first | `sg_memrd` |
 | WLAST one beat early | `sg_evtq` |
 | Record written into a full queue | `sg_evtq` |
 
-## 9. Results
+## 10. Results
 
 | Milestone | Tests | Seeds | Result |
 |---|---|---|---|
@@ -317,8 +353,12 @@ broken.
 | 3 | 51 | 1 to 8 | all pass |
 | 4 | 72 | 1 to 8 | all pass |
 | 5 | 73 | 1 to 8, 11 to 16 | all pass, 104 of 104 coverage bins on every seed |
+| 6 | 73, with each TLB policy | 1 | all pass, 104 of 104 coverage bins with both policies |
 
-Formal: 6 proofs pass by k-induction, about 30 seconds in total.
+Formal: 7 proofs pass by k-induction, about half a minute in total.
+
+Sizing study model check (`make validate`): 25 runs, 205,305 accesses, hit
+counters, table reads and translation cycles equal on every run.
 
 Synthesis check (Yosys, generic gates, default parameters):
 
@@ -332,7 +372,7 @@ Synthesis check (Yosys, generic gates, default parameters):
 Most of the milestone 3 growth is cache storage: the TLB alone holds 8 entries
 of about 90 bits.
 
-## 10. Known gaps
+## 11. Known gaps
 
 - Reset is only tested while idle, not during a burst.
 - Narrow transfers, WRAP and FIXED bursts are forwarded untouched but not

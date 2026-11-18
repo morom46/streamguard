@@ -125,4 +125,112 @@ module sg_addr_chan #(
     end
   end
 
+`ifdef FORMAL
+  // Proved for every behaviour of the device, the translation logic
+  // and the downstream side (make formal). The proof keeps its own
+  // record of the request in flight and of the decision given for it.
+  logic              f_busy;        // a request is in flight
+  logic              f_sent;        // ... its translation request was taken
+  logic              f_pass;        // ... the decision was "forward"
+  logic              f_fault;       // ... the decision was "terminate"
+  logic [ADDR_W-1:0] f_saddr;       // address the device gave
+  logic [SID_W-1:0]  f_sid;
+  logic [PAY_W-1:0]  f_pay;
+  logic [ADDR_W-1:0] f_oaddr;       // address the translation gave
+  logic              f_past_valid;
+
+  initial f_past_valid = 1'b0;
+  always @(posedge clk) f_past_valid <= 1'b1;
+  initial assume (!rst_n);
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      f_busy  <= 1'b0;
+      f_sent  <= 1'b0;
+      f_pass  <= 1'b0;
+      f_fault <= 1'b0;
+      f_saddr <= '0;
+      f_sid   <= '0;
+      f_pay   <= '0;
+      f_oaddr <= '0;
+    end else begin
+      if (s_valid && s_ready) begin
+        f_busy  <= 1'b1;
+        f_pass  <= 1'b0;
+        f_fault <= 1'b0;
+        f_saddr <= s_addr;
+        f_sid   <= s_sid;
+        f_pay   <= s_pay;
+      end
+      if (x_req_valid && x_req_ready) f_sent <= 1'b1;
+      // the decision is the first response after the request was taken
+      if (f_sent && x_rsp_valid) begin
+        f_sent  <= 1'b0;
+        f_pass  <= ~x_rsp_fault;
+        f_fault <= x_rsp_fault;
+        f_oaddr <= x_rsp_addr;
+      end
+      if ((m_valid && m_ready) || (term_valid && term_ready)) f_busy <= 1'b0;
+    end
+  end
+
+  always @(posedge clk) begin
+    if (rst_n) begin
+      // The state machine and the record agree (needed for induction)
+      assert (state_q <= S_TERM);
+      assert ((state_q == S_IDLE) == !f_busy);
+      assert ((state_q == S_XWAIT) == f_sent);
+      assert ((state_q == S_FWD) == (f_busy && f_pass));
+      assert ((state_q == S_TERM) == (f_busy && f_fault));
+      assert (!(f_pass && f_fault));
+      if (state_q == S_XREQ || state_q == S_XWAIT) begin
+        assert (addr_q == f_saddr);
+      end
+      if (f_busy) begin
+        assert (pay_q == f_pay);
+        assert (sid_q == f_sid);
+      end
+
+      // 1. Nothing goes downstream without a "forward" decision, and
+      //    then only with the translated address and the attributes
+      //    the device gave.
+      if (m_valid) begin
+        assert (f_pass);
+        assert (m_addr == f_oaddr);
+        assert (m_pay == f_pay);
+      end
+      // 2. A request is terminated only after a "terminate" decision.
+      if (term_valid) begin
+        assert (f_fault);
+        assert (term_pay == f_pay);
+      end
+      assert (!(m_valid && term_valid));
+      // 3. One request at a time.
+      if (f_busy) assert (!s_ready);
+      // 4. The translation is asked about the address and StreamID the
+      //    device gave.
+      if (x_req_valid) begin
+        assert (x_req_addr == f_saddr);
+        assert (x_req_sid == f_sid);
+      end
+    end
+
+    // 5. Handshake rule: VALID stays up with a stable payload until READY.
+    if (f_past_valid && rst_n && $past(rst_n)) begin
+      if ($past(m_valid && !m_ready)) begin
+        assert (m_valid);
+        assert ($stable(m_addr) && $stable(m_pay));
+      end
+      if ($past(x_req_valid && !x_req_ready)) begin
+        assert (x_req_valid);
+        assert ($stable(x_req_addr) && $stable(x_req_sid));
+      end
+      if ($past(term_valid && !term_ready)) begin
+        assert (term_valid);
+        assert ($stable(term_pay));
+      end
+    end
+  end
+`endif
+
 endmodule

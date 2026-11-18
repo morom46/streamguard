@@ -185,4 +185,73 @@ module sg_tlb #(
     else $error("TLB: address matches more than one entry");
 `endif
 
+`ifdef FORMAL
+  // Proved for every sequence of fills, invalidations and lookups
+  // (make formal). The proof watches one arbitrary page of one
+  // arbitrary address space and tracks whether a translation for it
+  // may be cached.
+  (* anyconst *) logic [ASID_W-1:0] f_asid;
+  (* anyconst *) logic [47:12]      f_va;
+  logic f_may;
+  logic f_past_valid;
+
+  initial f_past_valid = 1'b0;
+  always @(posedge clk) f_past_valid <= 1'b1;
+  initial assume (!rst_n);
+
+  // "Same page or block", written out separately from tag_mask so that
+  // a wrong mask in the design is seen by the proof.
+  function automatic f_same(input [47:12] a, input [47:12] b, input [1:0] lvl);
+    case (lvl)
+      2'd1:    f_same = (a[47:30] == b[47:30]);     // 1 GB block
+      2'd2:    f_same = (a[47:21] == b[47:21]);     // 2 MB block
+      default: f_same = (a == b);                   // 4 KB page
+    endcase
+  endfunction
+
+  // A fill covers the watched page; an invalidation names it
+  logic f_fill_covers, f_inv_names;
+  assign f_fill_covers = (fill_asid == f_asid) && f_same(fill_va, f_va, fill_level);
+  assign f_inv_names   = (!inv_asid_en || inv_asid == f_asid) &&
+                         (!inv_va_en   || inv_va == f_va);
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n)                     f_may <= 1'b0;
+    else if (inv_all)               f_may <= 1'b0;
+    else if (inv_sel) begin
+      if (f_inv_names)              f_may <= 1'b0;
+    end
+    else if (fill && f_fill_covers) f_may <= 1'b1;
+  end
+
+  always @(posedge clk) begin
+    if (rst_n) begin
+      // 1. An entry covering the watched page exists only if one was
+      //    filled and the page was not invalidated since.
+      for (int i = 0; i < ENTRIES; i++) begin
+        if (v_q[i] && asid_q[i] == f_asid &&
+            ((vtag_q[i] ^ f_va) & tag_mask(lvl_q[i])) == 36'b0) begin
+          assert (f_may);
+        end
+      end
+      // What the lookup sees: an invalidated page never hits until it
+      // is filled again, whatever size of entry covered it.
+      if (lk_asid == f_asid && lk_va[47:12] == f_va && hit) assert (f_may);
+
+      // 2. The output address keeps the offset inside the page or block.
+      if (hit) begin
+        assert (hit_pa[11:0] == lk_va[11:0]);
+        if (hit_level == 2'd2) assert (hit_pa[20:0] == lk_va[20:0]);
+        if (hit_level == 2'd1) assert (hit_pa[29:0] == lk_va[29:0]);
+      end
+    end
+    // 3. A fill is visible to the next lookup of that address.
+    if (f_past_valid && rst_n && $past(rst_n) &&
+        $past(fill && !inv_all && !inv_sel) &&
+        lk_asid == $past(fill_asid) && lk_va[47:12] == $past(fill_va)) begin
+      assert (hit);
+    end
+  end
+`endif
+
 endmodule

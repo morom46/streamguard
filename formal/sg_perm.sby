@@ -1,0 +1,17 @@
+# Permission check: the rule equals its case table for every input.
+# Run from the repository root with: make formal
+
+[options]
+mode prove
+depth 4
+
+[engines]
+smtbmc z3
+
+[script]
+read_verilog -sv -formal sg_perm.sv
+prep -top sg_perm
+async2sync
+
+[files]
+rtl/sg_perm.sv

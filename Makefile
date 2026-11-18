@@ -1,8 +1,9 @@
 # StreamGuard - top level targets
 #
 #   make lint    Verilator lint of the RTL
-#   make test    run the cocotb regression
+#   make test    run the cocotb regression (writes build/coverage.md)
 #   make synth   generic synthesis with Yosys, prints a cell report
+#   make formal  prove the properties in formal/ (SymbiYosys with Z3)
 #   make clean
 
 RTL_SRCS := rtl/sg_pkg.sv \
@@ -22,7 +23,7 @@ RTL_SRCS := rtl/sg_pkg.sv \
 
 LINT_FLAGS := -Wall -Wno-UNUSEDSIGNAL -Wno-UNUSEDPARAM -Wno-SYNCASYNCNET
 
-.PHONY: lint test synth clean
+.PHONY: lint test synth formal clean
 
 lint:
 	verilator --lint-only $(LINT_FLAGS) --assert -DSG_ASSERT \
@@ -41,6 +42,16 @@ synth:
 build:
 	mkdir -p build
 synth: | build
+
+FORMAL_PROOFS := sg_perm sg_tagcache sg_tlb sg_addr_chan sg_memrd sg_evtq
+SBY := yowasp-sby --yosys yowasp-yosys --smtbmc yowasp-yosys-smtbmc
+
+formal: | build
+	@for p in $(FORMAL_PROOFS); do \
+	    if $(SBY) -f -d build/formal/$$p formal/$$p.sby > build/formal_$$p.log 2>&1; \
+	    then echo "PROVED  $$p"; \
+	    else echo "FAILED  $$p   (see build/formal_$$p.log)"; exit 1; fi; \
+	done
 
 clean:
 	rm -rf build tb/sim_build tb/results.xml tb/__pycache__ tb/*.fst

@@ -96,4 +96,87 @@ module sg_memrd #(
   logic unused;
   assign unused = &{1'b0, t_axi_rid};
 
+`ifdef FORMAL
+  // AXI read manager rules, proved for every behaviour of the memory
+  // (make formal).
+  //
+  // Assumed (the contract of this module's ports):
+  //   * the requester keeps req_addr and req_two stable until done
+  //   * the memory returns RLAST on the last beat of the burst
+  logic        f_ar_done;       // address handshake happened
+  logic [1:0]  f_beats;         // data beats taken
+  logic [63:0] f_d0, f_d1;      // what the memory returned
+  logic        f_err;
+  logic        f_past_valid;
+
+  initial f_past_valid = 1'b0;
+  always @(posedge clk) f_past_valid <= 1'b1;
+  initial assume (!rst_n);
+
+  always @(posedge clk) begin
+    if (f_past_valid && state_q != M_IDLE) begin
+      assume (req_addr == $past(req_addr));
+      assume (req_two == $past(req_two));
+    end
+    if (t_axi_rvalid && t_axi_rready) assume (t_axi_rlast == (beat_q == req_two));
+  end
+
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      f_ar_done <= 1'b0;
+      f_beats   <= '0;
+      f_d0      <= '0;
+      f_d1      <= '0;
+      f_err     <= 1'b0;
+    end else begin
+      if (state_q == M_IDLE) begin
+        f_ar_done <= 1'b0;
+        f_beats   <= '0;
+        f_err     <= 1'b0;
+      end
+      if (t_axi_arvalid && t_axi_arready) f_ar_done <= 1'b1;
+      if (t_axi_rvalid && t_axi_rready) begin
+        f_beats <= f_beats + 2'd1;
+        if (f_beats == 2'd0) f_d0 <= t_axi_rdata;
+        if (f_beats == 2'd1) f_d1 <= t_axi_rdata;
+        if (t_axi_rresp != 2'b00) f_err <= 1'b1;
+      end
+    end
+  end
+
+  always @(posedge clk) begin
+    if (rst_n) begin
+      // the state machine and the record agree (needed for induction)
+      if (state_q == M_ADDR) assert (!f_ar_done && f_beats == 2'd0 && !beat_q && !f_err && !err);
+      if (state_q == M_DATA) begin
+        assert (f_ar_done);
+        assert (f_beats == {1'b0, beat_q});
+        assert (f_beats <= {1'b0, req_two});
+        assert (err == f_err);
+        if (beat_q) assert (data0 == f_d0);
+      end
+
+      // 1. One address request per read, and data is only accepted
+      //    after it.
+      if (t_axi_arvalid) assert (!f_ar_done);
+      if (t_axi_rready)  assert (f_ar_done);
+      assert (t_axi_arlen == {7'b0, req_two});
+
+      // 2. What is handed back is what the memory returned.
+      if (done) begin
+        assert (f_beats == {1'b0, req_two} + 2'd1);
+        assert (data0 == f_d0);
+        if (req_two) assert (data1 == f_d1);
+        assert (err == f_err);
+      end
+    end
+
+    // 3. Handshake rule on the address channel.
+    if (f_past_valid && rst_n && $past(rst_n) && $past(t_axi_arvalid && !t_axi_arready)) begin
+      assert (t_axi_arvalid);
+      assert ($stable(t_axi_araddr) && $stable(t_axi_arlen));
+    end
+  end
+`endif
+
 endmodule

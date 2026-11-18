@@ -1,0 +1,18 @@
+# Event queue writer: AXI write rules, no write when disabled or full.
+# Run from the repository root with: make formal
+
+[options]
+mode prove
+depth 10
+
+[engines]
+smtbmc z3
+
+[script]
+read_verilog -sv -formal sg_pkg.sv sg_evtq.sv
+prep -top sg_evtq
+async2sync
+
+[files]
+rtl/sg_pkg.sv
+rtl/sg_evtq.sv

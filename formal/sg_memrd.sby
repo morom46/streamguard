@@ -1,0 +1,17 @@
+# Memory read port: AXI read rules, data handed back unchanged.
+# Run from the repository root with: make formal
+
+[options]
+mode prove
+depth 8
+
+[engines]
+smtbmc z3
+
+[script]
+read_verilog -sv -formal sg_memrd.sv
+prep -top sg_memrd
+async2sync
+
+[files]
+rtl/sg_memrd.sv
